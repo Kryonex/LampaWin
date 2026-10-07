@@ -1,0 +1,79 @@
+diff --git a/gulpfile.js b/gulpfile.js
+index 41ca49b4..077b6b5b 100644
+--- a/gulpfile.js
++++ b/gulpfile.js
+@@ -415,6 +415,7 @@ function buildDoc(done){
+ exports.pack_webos   = series(sync_webos, uglify_task, public_webos, index_webos);
+ exports.pack_tizen   = series(sync_tizen, uglify_task, public_tizen, index_tizen);
+ exports.pack_github  = series(sync_github, uglify_task, public_github, write_manifest, index_github);
++exports.pack_desktop = series(merge, plugins, sass_task, lang_task, sync_github, uglify_task, public_github, write_manifest, index_github);
+ exports.pack_plugins = series(plugins);
+ exports.test         = series(test);
+ exports.default = parallel(watch, browser_sync);
+diff --git a/public/plugins/modification.js b/public/plugins/modification.js
+new file mode 100644
+index 00000000..7ab8f945
+--- /dev/null
++++ b/public/plugins/modification.js
+@@ -0,0 +1 @@
++// LampaWin's default user modification hook. Intentionally empty.
+diff --git a/src/core/vpn.js b/src/core/vpn.js
+index d46fc70b..6e34210d 100644
+--- a/src/core/vpn.js
++++ b/src/core/vpn.js
+@@ -61,6 +61,11 @@ let extract = (call, error)=>{
+ }
+ 
+ function task(call){
++    if(window.__lampawinOrigin){
++        if(!window.lampa_settings.disable_features.install_proxy) TMDBProxy.init()
++        return call && call()
++    }
++
+     if(!window.lampa_settings.geo) return call && call()
+ 
+     extract((country)=>{
+@@ -123,4 +128,4 @@ Object.defineProperty(vpn, 'code', {
+ })
+ 
+ 
+-export default vpn
+\ No newline at end of file
++export default vpn
+diff --git a/src/services/libs.js b/src/services/libs.js
+index edac8741..918c66f4 100644
+--- a/src/services/libs.js
++++ b/src/services/libs.js
+@@ -20,18 +20,23 @@ function init(){
+     //     include.push(Utils.protocol() + 'youtube.com/iframe_api')
+     // }
+ 
+-    // Плагины различные
+-    if(!window.lampa_settings.iptv && window.lampa_settings.services){
+-        include.push(Utils.protocol() + Manifest.cub_domain + '/plugin/sport')
+-        include.push(Utils.protocol() + Manifest.cub_domain + '/plugin/tsarea')
+-    }
++    // Native LampaWin runs third-party web plugins in the same origin as the
++    // privileged desktop bridge. Keep built-in local plugins and libraries,
++    // but do not execute remote CUB plugins automatically in that context.
++    if(!window.__lampawinOrigin){
++        // Плагины различные
++        if(!window.lampa_settings.iptv && window.lampa_settings.services){
++            include.push(Utils.protocol() + Manifest.cub_domain + '/plugin/sport')
++            include.push(Utils.protocol() + Manifest.cub_domain + '/plugin/tsarea')
++        }
+ 
+-    // Плагин Shots
+-    if(window.location.hostname !== 'localhost' && !window.lampa_settings.iptv) include.push(Utils.protocol() + Manifest.cub_domain + '/plugin/shots')
++        // Плагин Shots
++        if(window.location.hostname !== 'localhost' && !window.lampa_settings.iptv) include.push(Utils.protocol() + Manifest.cub_domain + '/plugin/shots')
++    }
+ 
+     Utils.putScriptOfMirrors(include,()=>{})
+ }
+ 
+ export default {
+     init
+-}
+\ No newline at end of file
++}

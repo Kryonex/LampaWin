@@ -1,0 +1,179 @@
+<Window x:Class="LampaWin.Desktop.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vlc="clr-namespace:LibVLCSharp.WPF;assembly=LibVLCSharp.WPF"
+        Title="LampaWin" Icon="Assets/LampaWin.ico" Width="1440" Height="900" MinWidth="920" MinHeight="600"
+        WindowStartupLocation="CenterScreen" Background="{StaticResource BackgroundBrush}"
+        Foreground="{StaticResource TextBrush}" FontFamily="Segoe UI" KeyDown="Window_KeyDown" Closed="Window_Closed">
+  <Grid>
+    <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="30"/></Grid.RowDefinitions>
+    <Grid x:Name="MainContentGrid" Grid.Row="0" Margin="18,0,18,12">
+      <Grid x:Name="BrowserPage">
+        <Border CornerRadius="14" Background="#0B0C10" ClipToBounds="True">
+          <wv2:WebView2 x:Name="BrowserView" xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"/>
+        </Border>
+        <Border x:Name="StartupOverlay" Background="#D9101116" CornerRadius="14" Visibility="Visible">
+          <StackPanel Width="380" HorizontalAlignment="Center" VerticalAlignment="Center">
+            <TextBlock Text="Запускаем LampaWin" FontSize="25" FontWeight="SemiBold" HorizontalAlignment="Center"/>
+            <TextBlock x:Name="StartupMessage" Text="Подготавливаем локальный просмотр и поиск…" Foreground="{StaticResource MutedBrush}" TextAlignment="Center" Margin="0,12,0,18" TextWrapping="Wrap"/>
+            <ProgressBar x:Name="StartupProgress" Height="4" IsIndeterminate="True" Foreground="{StaticResource AccentBrush}" Background="#34343D"/>
+          </StackPanel>
+        </Border>
+        <Border x:Name="ErrorOverlay" Background="#E6101116" CornerRadius="14" Visibility="Collapsed">
+          <StackPanel Width="420" HorizontalAlignment="Center" VerticalAlignment="Center">
+            <TextBlock Text="Не удалось запустить локальные сервисы" FontSize="21" FontWeight="SemiBold" TextAlignment="Center" TextWrapping="Wrap"/>
+            <TextBlock x:Name="ErrorMessage" Text="Проверьте файлы приложения и попробуйте восстановить запуск." Foreground="{StaticResource MutedBrush}" TextAlignment="Center" Margin="0,12,0,18" TextWrapping="Wrap"/>
+            <Button Content="Повторить запуск" Background="{StaticResource AccentBrush}" HorizontalAlignment="Center" Click="Recover_Click"/>
+          </StackPanel>
+        </Border>
+      </Grid>
+      <Border x:Name="SettingsPage" Background="{StaticResource SurfaceBrush}" CornerRadius="14" Padding="28" Visibility="Collapsed">
+        <ScrollViewer VerticalScrollBarVisibility="Auto"><StackPanel MaxWidth="760" HorizontalAlignment="Left">
+          <TextBlock Text="Источники и состояние" FontSize="25" FontWeight="SemiBold"/>
+          <TextBlock Text="Сервисы работают локально на этом компьютере." Foreground="{StaticResource MutedBrush}" Margin="0,7,0,24"/>
+          <TextBlock Text="Состояние" FontWeight="SemiBold" Margin="0,0,0,8"/>
+          <Border Background="{StaticResource SurfaceRaisedBrush}" CornerRadius="10" Padding="14" Margin="0,0,0,22"><TextBlock x:Name="SettingsStatus" Text="Ожидание запуска" TextWrapping="Wrap"/></Border>
+          <TextBlock Text="Индексаторы поиска" FontWeight="SemiBold" Margin="0,0,0,8"/>
+          <ItemsControl x:Name="SourcesList" Margin="0,0,0,20"><ItemsControl.ItemTemplate><DataTemplate><Border Background="{StaticResource SurfaceRaisedBrush}" CornerRadius="8" Padding="12,9" Margin="0,0,0,6"><TextBlock Text="{Binding}"/></Border></DataTemplate></ItemsControl.ItemTemplate></ItemsControl>
+          <TextBlock x:Name="SourcesEmpty" Text="Список появится после запуска Jackett." Foreground="{StaticResource MutedBrush}" Margin="0,0,0,16"/>
+          <TextBlock Text="Журналы" FontWeight="SemiBold" Margin="0,0,0,8"/>
+          <TextBlock x:Name="LogPathText" Text="Путь к журналам будет показан после запуска." Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap"/>
+          <Button Content="Открыть папку журналов" HorizontalAlignment="Left" Margin="0,14,0,0" Click="OpenLogs_Click"/>
+        </StackPanel></ScrollViewer>
+      </Border>
+      <Grid x:Name="PlayerPage" Visibility="Collapsed" Background="Black">
+        <!-- VideoView owns a transparent foreground HWND; sibling WPF controls cannot cover native VLC. -->
+        <vlc:VideoView x:Name="VideoSurface" Background="Black">
+          <Grid x:Name="PlayerOverlay" Background="#01000000" Focusable="True"
+                PreviewMouseMove="Player_MouseMove" PreviewKeyDown="Window_KeyDown">
+            <Grid.Resources>
+              <Style x:Key="PlayerButton" TargetType="Button">
+                <Setter Property="Foreground" Value="White"/>
+                <Setter Property="Background" Value="Transparent"/>
+                <Setter Property="BorderThickness" Value="0"/>
+                <Setter Property="Width" Value="44"/>
+                <Setter Property="Height" Value="44"/>
+                <Setter Property="FontSize" Value="21"/>
+                <Setter Property="FontFamily" Value="Segoe MDL2 Assets"/>
+                <Setter Property="Cursor" Value="Hand"/>
+                <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
+                  <Border x:Name="Plate" Background="{TemplateBinding Background}" CornerRadius="22">
+                    <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                  </Border>
+                  <ControlTemplate.Triggers>
+                    <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Plate" Property="Background" Value="#30FFFFFF"/></Trigger>
+                    <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Plate" Property="Background" Value="#40FFFFFF"/></Trigger>
+                    <Trigger Property="IsPressed" Value="True"><Setter TargetName="Plate" Property="Background" Value="#60FFFFFF"/></Trigger>
+                    <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value=".4"/></Trigger>
+                  </ControlTemplate.Triggers>
+                </ControlTemplate></Setter.Value></Setter>
+              </Style>
+              <Style x:Key="PlayerSlider" TargetType="Slider">
+                <Setter Property="Height" Value="26"/>
+                <Setter Property="Foreground" Value="#FF334B"/>
+                <Setter Property="Cursor" Value="Hand"/>
+                <Setter Property="IsMoveToPointEnabled" Value="True"/>
+                <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Slider">
+                  <Grid Background="Transparent">
+                    <Track x:Name="PART_Track" VerticalAlignment="Center">
+                      <Track.DecreaseRepeatButton><RepeatButton Command="Slider.DecreaseLarge" IsTabStop="False">
+                        <RepeatButton.Template><ControlTemplate TargetType="RepeatButton"><Border Height="4" CornerRadius="2" Background="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Slider}}"/></ControlTemplate></RepeatButton.Template>
+                      </RepeatButton></Track.DecreaseRepeatButton>
+                      <Track.Thumb><Thumb Width="12" Height="12">
+                        <Thumb.Template><ControlTemplate TargetType="Thumb"><Ellipse Fill="White"/></ControlTemplate></Thumb.Template>
+                      </Thumb></Track.Thumb>
+                      <Track.IncreaseRepeatButton><RepeatButton Command="Slider.IncreaseLarge" IsTabStop="False">
+                        <RepeatButton.Template><ControlTemplate TargetType="RepeatButton"><Border Height="4" CornerRadius="2" Background="#55FFFFFF"/></ControlTemplate></RepeatButton.Template>
+                      </RepeatButton></Track.IncreaseRepeatButton>
+                    </Track>
+                  </Grid>
+                </ControlTemplate></Setter.Value></Setter>
+              </Style>
+              <Style x:Key="TrackPicker" TargetType="ComboBox">
+                <Setter Property="Foreground" Value="White"/><Setter Property="Background" Value="#303038"/>
+                <Setter Property="Padding" Value="12,10"/><Setter Property="MinHeight" Value="40"/>
+                <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ComboBox">
+                  <Grid>
+                    <ToggleButton Focusable="False" IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
+                      <ToggleButton.Template><ControlTemplate TargetType="ToggleButton"><Border Background="#303038" CornerRadius="8"/></ControlTemplate></ToggleButton.Template>
+                    </ToggleButton>
+                    <ContentPresenter Margin="12,10,32,10" IsHitTestVisible="False" Content="{TemplateBinding SelectionBoxItem}" ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"/>
+                    <TextBlock Text="&#xE70D;" FontFamily="Segoe MDL2 Assets" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,12,0" IsHitTestVisible="False"/>
+                    <Popup x:Name="PART_Popup" Placement="Bottom" IsOpen="{TemplateBinding IsDropDownOpen}" AllowsTransparency="True" Focusable="False" PopupAnimation="Fade">
+                      <Border Background="#24242B" CornerRadius="8" BorderBrush="#505058" BorderThickness="1" Padding="4" MinWidth="{Binding ActualWidth, RelativeSource={RelativeSource TemplatedParent}}">
+                        <ScrollViewer MaxHeight="240" CanContentScroll="True"><ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/></ScrollViewer>
+                      </Border>
+                    </Popup>
+                  </Grid>
+                </ControlTemplate></Setter.Value></Setter>
+              </Style>
+            </Grid.Resources>
+            <Border x:Name="VideoClickSurface" Background="#01000000" MouseLeftButtonDown="Video_MouseDown"/>
+            <Border x:Name="PlayerTopBar" VerticalAlignment="Top" Padding="20,14,24,50">
+              <Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="0,1"><GradientStop Color="#C0000000" Offset="0"/><GradientStop Color="#00000000" Offset="1"/></LinearGradientBrush></Border.Background>
+              <DockPanel>
+                <Button Style="{StaticResource PlayerButton}" Content="&#xE72B;" Click="Home_Click" ToolTip="Вернуться к каталогу (Esc)" AutomationProperties.Name="Вернуться к каталогу"/>
+                <TextBlock x:Name="MediaTitle" Text="Воспроизведение" FontSize="18" FontWeight="SemiBold" Foreground="White" VerticalAlignment="Center" Margin="14,0,0,0" TextTrimming="CharacterEllipsis"/>
+              </DockPanel>
+            </Border>
+            <Border x:Name="PlaybackFeedback" HorizontalAlignment="Center" VerticalAlignment="Center" Background="#A0202020" Width="82" Height="82" CornerRadius="41" Opacity="0" IsHitTestVisible="False">
+              <TextBlock x:Name="FeedbackGlyph" Text="&#xE769;" FontFamily="Segoe MDL2 Assets" FontSize="32" Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <Border x:Name="PlayerBottomBar" VerticalAlignment="Bottom" Padding="24,60,24,14">
+              <Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="0,1"><GradientStop Color="#00000000" Offset="0"/><GradientStop Color="#DF000000" Offset="1"/></LinearGradientBrush></Border.Background>
+              <StackPanel>
+                <Slider x:Name="PositionSlider" Style="{StaticResource PlayerSlider}" Minimum="0" Maximum="1000" ValueChanged="PositionSlider_ValueChanged"
+                        PreviewMouseLeftButtonDown="PositionSlider_MouseDown" PreviewMouseLeftButtonUp="PositionSlider_MouseUp" LostMouseCapture="PositionSlider_LostCapture"
+                        MouseMove="PositionSlider_MouseMove" MouseLeave="PositionSlider_MouseLeave" AutomationProperties.Name="Позиция воспроизведения"/>
+                <Grid Margin="0,2,0,0">
+                  <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                  <StackPanel Grid.Column="0" Orientation="Horizontal">
+                    <Button x:Name="PlayPauseButton" Style="{StaticResource PlayerButton}" Content="&#xE769;" Click="PlayPause_Click" ToolTip="Пауза (Space / K)" AutomationProperties.Name="Пауза или воспроизведение"/>
+                    <Button Style="{StaticResource PlayerButton}" FontFamily="Segoe UI" FontSize="15" FontWeight="SemiBold" Content="−10" Click="Rewind_Click" ToolTip="Назад на 10 секунд (J / ←)" AutomationProperties.Name="Назад на 10 секунд"/>
+                    <Button Style="{StaticResource PlayerButton}" FontFamily="Segoe UI" FontSize="15" FontWeight="SemiBold" Content="+10" Click="Forward_Click" ToolTip="Вперёд на 10 секунд (L / →)" AutomationProperties.Name="Вперёд на 10 секунд"/>
+                    <Button x:Name="MuteButton" Style="{StaticResource PlayerButton}" Content="&#xE767;" Click="Mute_Click" ToolTip="Выключить звук (M)" AutomationProperties.Name="Включить или выключить звук" Margin="8,0,0,0"/>
+                    <Slider x:Name="VolumeSlider" Style="{StaticResource PlayerSlider}" Foreground="White" Width="84" VerticalAlignment="Center" Minimum="0" Maximum="100" Value="80" Margin="0,0,18,0" AutomationProperties.Name="Громкость"/>
+                    <TextBlock x:Name="TimeLabel" Text="0:00 / 0:00" Foreground="White" FontSize="13" VerticalAlignment="Center"/>
+                  </StackPanel>
+                  <StackPanel Grid.Column="2" Orientation="Horizontal">
+                    <Button x:Name="PlayerSettingsButton" Style="{StaticResource PlayerButton}" Content="&#xE713;" Click="PlayerSettings_Click" ToolTip="Аудиодорожки и субтитры" AutomationProperties.Name="Настройки воспроизведения"/>
+                    <Button x:Name="FullscreenButton" Style="{StaticResource PlayerButton}" Content="&#xE740;" Click="Fullscreen_Click" ToolTip="На весь экран (F / F11)" AutomationProperties.Name="Полноэкранный режим" Margin="4,0,0,0"/>
+                  </StackPanel>
+                </Grid>
+              </StackPanel>
+            </Border>
+            <Border x:Name="PlayerSettingsPanel" Width="320" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,24,116" Padding="20" Background="#F2222229" BorderBrush="#44444C" BorderThickness="1" CornerRadius="14" Visibility="Collapsed">
+              <StackPanel>
+                <DockPanel Margin="0,0,0,18"><TextBlock Text="Настройки видео" FontWeight="SemiBold" FontSize="16" Foreground="White" VerticalAlignment="Center"/><Button DockPanel.Dock="Right" Content="&#xE711;" Style="{StaticResource PlayerButton}" Width="28" Height="28" FontSize="14" Click="PlayerSettings_Click" ToolTip="Закрыть настройки"/></DockPanel>
+                <TextBlock Text="Аудиодорожка" Foreground="#BBBBCC" Margin="0,0,0,8"/>
+                <ComboBox x:Name="AudioTracks" Style="{StaticResource TrackPicker}" SelectionChanged="AudioTracks_SelectionChanged" AutomationProperties.Name="Аудиодорожка"/>
+                <TextBlock Text="Субтитры" Foreground="#BBBBCC" Margin="0,18,0,8"/>
+                <ComboBox x:Name="SubtitleTracks" Style="{StaticResource TrackPicker}" SelectionChanged="SubtitleTracks_SelectionChanged" AutomationProperties.Name="Субтитры"/>
+              </StackPanel>
+            </Border>
+            <Border x:Name="SeekPreview" Background="#E6222229" CornerRadius="6" Padding="9,5" HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="24,0,0,92" Visibility="Collapsed" IsHitTestVisible="False"><TextBlock x:Name="SeekPreviewText" Foreground="White" FontSize="12"/></Border>
+          </Grid>
+        </vlc:VideoView>
+      </Grid>
+    </Grid>
+    <Border x:Name="WindowFooter" Grid.Row="1" Background="{StaticResource SurfaceBrush}" Padding="18,0">
+      <DockPanel LastChildFill="False">
+        <TextBlock x:Name="FooterStatus" Text="Ожидание запуска" Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center"/>
+        <Button x:Name="ServicesMenuButton" Content="⚙  Сервисы" Padding="10,4" VerticalAlignment="Center" DockPanel.Dock="Right" Click="ServicesMenu_Click">
+          <Button.ContextMenu>
+            <ContextMenu>
+              <MenuItem Header="Состояние и источники" Click="Settings_Click"/>
+              <MenuItem Header="←  К каталогу" Click="Home_Click"/>
+              <Separator/>
+              <MenuItem Header="Восстановить сервисы" Click="Recover_Click"/>
+              <MenuItem Header="Открыть папку журналов" Click="OpenLogs_Click"/>
+              <Separator/>
+              <MenuItem Header="Выход" Click="Exit_Click"/>
+            </ContextMenu>
+          </Button.ContextMenu>
+        </Button>
+        <TextBlock Text="F11 — полный экран   ·   Space — пауза   ·   ← → — перемотка" Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center" DockPanel.Dock="Right" Margin="0,0,14,0"/>
+      </DockPanel>
+    </Border>
+  </Grid>
+</Window>

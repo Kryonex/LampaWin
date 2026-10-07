@@ -1,0 +1,14 @@
+Microsoft Edge WebView2 Runtime
+
+LampaWin uses Microsoft's WebView2 Runtime to display the Lampa interface.
+If this runtime is not already installed, setup will download Microsoft's
+Evergreen bootstrapper and install the current runtime for the current user.
+An Internet connection is required only when the runtime is missing.
+
+Please review Microsoft's WebView2 distribution and license information and
+privacy statement before continuing:
+https://learn.microsoft.com/microsoft-edge/webview2/concepts/distribution
+https://privacy.microsoft.com/privacystatement
+
+The bootstrapper is downloaded from an official Microsoft CDN and is checked
+for a valid Microsoft digital signature before it is bundled by the builder.

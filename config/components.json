@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "architecture": "win-x64",
+  "components": {
+    "torrserver": {
+      "version": "MatriX.145.2",
+      "commit": "bb3f4468d38a96f4df563f28c9fd4ccc3b2b37a9",
+      "repository": "https://github.com/YouROK/TorrServer",
+      "asset": "TorrServer-windows-amd64.exe",
+      "url": "https://github.com/YouROK/TorrServer/releases/download/MatriX.145.2/TorrServer-windows-amd64.exe",
+      "sha256": "778bbc9bffb2e4d837a3a2c470fc2a4048d30f0a2004eb2553cd4a495b1bb2d6",
+      "license": "GPL-3.0"
+    },
+    "jackett": {
+      "version": "v0.24.2798",
+      "commit": "125f96b2aed180f377890433714f6a2879eb3be6",
+      "repository": "https://github.com/Jackett/Jackett",
+      "releaseAsset": "Jackett.Binaries.Windows.zip",
+      "releaseUrl": "https://github.com/Jackett/Jackett/releases/download/v0.24.2798/Jackett.Binaries.Windows.zip",
+      "releaseSha256": "7318fc8f05477a5bf0328ec0d4249ebb76fa1a8c9e49cc3d4942fe785f098aee",
+      "license": "GPL-2.0",
+      "patch": "Keep custom data folder permissions inherited from current user's profile; remove upstream WorldSid FullControl ACLs."
+    },
+    "lampa": {
+      "version": "b4a13b6af7fe2f3bbbcb91f4eb434ab3378f8d5d",
+      "commit": "b4a13b6af7fe2f3bbbcb91f4eb434ab3378f8d5d",
+      "repository": "https://github.com/yumata/lampa-source",
+      "license": "GPL-2.0",
+      "packageLock": "tools/packaging/lampa-package-lock.json",
+      "packageLockSha256": "42b38e902086a4a521a3adc807ae07ac6f3411afe10d6e62c48203601ca0a39e"
+    },
+    "webview2Bootstrapper": {
+      "version": "154 Evergreen bootstrapper",
+      "url": "https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/c289719c-c70c-464b-81ea-9efa692d5428/MicrosoftEdgeWebview2Setup.exe",
+      "sha256": "aa38a8cfce6179b87181609b1c730a29eaf26138fc833af5759e67576770f3a3",
+      "signer": "Microsoft Corporation"
+    }
+  }
+}

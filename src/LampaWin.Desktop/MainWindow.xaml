@@ -140,6 +140,14 @@
                     </StackPanel>
                   </StackPanel>
                   <StackPanel Grid.Column="2" Orientation="Horizontal">
+                    <Button x:Name="FoodButton" Style="{StaticResource PlayerButton}" Click="Food_Click" ToolTip="Заказать еду" AutomationProperties.Name="Заказать еду">
+                      <Viewbox Width="23" Height="23"><Canvas Width="24" Height="24">
+                        <Path Fill="White" Data="M3,10 C3,1 21,1 21,10 Z"/>
+                        <Path Stroke="#101116" StrokeThickness="1.3" Data="M7,6 L8,7 M12,5 L13,6 M16,6 L17,7"/>
+                        <Rectangle Canvas.Left="3" Canvas.Top="12" Width="18" Height="3" RadiusX="1.5" RadiusY="1.5" Fill="White"/>
+                        <Path Fill="White" Data="M3,17 L21,17 C21,23 3,23 3,17 Z"/>
+                      </Canvas></Viewbox>
+                    </Button>
                     <Button x:Name="PlayerSettingsButton" Style="{StaticResource PlayerButton}" Content="&#xE713;" Click="PlayerSettings_Click" ToolTip="Аудиодорожки и субтитры" AutomationProperties.Name="Настройки воспроизведения"/>
                     <Button x:Name="FullscreenButton" Style="{StaticResource PlayerButton}" Content="&#xE740;" Click="Fullscreen_Click" ToolTip="На весь экран (F / F11)" AutomationProperties.Name="Полноэкранный режим" Margin="4,0,0,0"/>
                   </StackPanel>
@@ -164,6 +172,7 @@
                 <TextBlock x:Name="SeekPreviewText" Foreground="White" FontSize="12" FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,4,0,1"/>
               </StackPanel>
             </Border>
+            <Border x:Name="FoodPanelHost" Width="420" HorizontalAlignment="Right" VerticalAlignment="Stretch" Margin="0,76,20,108" Background="#1D1D23" BorderBrush="#555560" BorderThickness="1" CornerRadius="12" Visibility="Collapsed" ClipToBounds="True"/>
           </Grid>
         </vlc:VideoView>
       </Grid>

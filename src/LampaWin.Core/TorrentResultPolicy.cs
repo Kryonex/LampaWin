@@ -21,7 +21,7 @@ public static class TorrentResultPolicy
         "фильм", "сериал", "сезон", "серия"
     };
 
-    public static void FilterAndRank(JsonArray items, string? query)
+    public static void FilterAndRank(JsonArray items, string? query, int? releaseYear = null, bool isSeries = false)
     {
         ArgumentNullException.ThrowIfNull(items);
         var queryTokens = Tokens(query).Where(x => !IgnoredQueryWords.Contains(x)
@@ -35,7 +35,7 @@ public static class TorrentResultPolicy
         }
         var candidates = items.Where(x => x is JsonObject).Cast<JsonObject>()
             .Where(x => !IsGame(x))
-            .Where(x => IsRelevant(x, queryTokens, query))
+            .Where(x => IsRelevant(x, queryTokens, query, releaseYear, isSeries))
             .ToList();
 
         // Zero-seed results cannot start reliably. Keep them only when Jackett returned no
@@ -65,7 +65,7 @@ public static class TorrentResultPolicy
         return category is >= 1000 and < 2000 or >= 4000 and < 5000;
     }
 
-    private static bool IsRelevant(JsonObject item, HashSet<string> queryTokens, string? query)
+    private static bool IsRelevant(JsonObject item, HashSet<string> queryTokens, string? query, int? releaseYear, bool isSeries)
     {
         if (queryTokens.Count == 0) return true;
         var title = Text(item, "Title");
@@ -73,6 +73,16 @@ public static class TorrentResultPolicy
         foreach (Match number in Regex.Matches(title, @"\b\d{3,4}\b")) titleTokens.Add(number.Value);
         var required = queryTokens.Count == 1 ? 1 : Math.Max(2, (int)Math.Ceiling(queryTokens.Count * .75));
         if (queryTokens.Count(titleTokens.Contains) < required) return false;
+        // Indexers can match words inside subtitles of completely different films.
+        // Require identity at the start of a title or translated alias, after group tags.
+        var identity = Tokens(query).FirstOrDefault(queryTokens.Contains) ?? queryTokens.First();
+        if (!Regex.Split(title, @"[/|]").Any(alias =>
+        {
+            var withoutGroup = Regex.Replace(alias.Trim(), @"^(?:\[[^\]]+\]\s*)+", string.Empty);
+            var words = Normalize(withoutGroup).Split(' ', StringSplitOptions.RemoveEmptyEntries)
+                .Where(word => !IgnoredQueryWords.Contains(word) && word is not ("a" or "an"));
+            return words.FirstOrDefault() == identity;
+        })) return false;
         var season = Regex.Match(query ?? string.Empty, @"\b(?:s|season\s*|сезон\s*)(\d{1,2})", RegexOptions.IgnoreCase);
         if (season.Success)
         {
@@ -101,11 +111,13 @@ public static class TorrentResultPolicy
         }
         // A year is not a title word, but a conflicting explicit release year is
         // useful evidence against remakes and movies sharing the same name.
-        var queryYear = Regex.Match(query ?? string.Empty, @"\b(?:19|20)\d{2}\b").Value;
+        var queryYear = releaseYear?.ToString(CultureInfo.InvariantCulture)
+            ?? Regex.Match(query ?? string.Empty, @"\b(?:19|20)\d{2}\b").Value;
         if (queryYear.Length > 0)
         {
             var titleYears = Regex.Matches(title, @"\b(?:19|20)\d{2}\b");
-            if (titleYears.Count > 0 && !titleYears.Any(year => year.Value == queryYear)) return false;
+            if (titleYears.Count > 0 && !titleYears.Any(year => year.Value == queryYear
+                || releaseYear.HasValue && isSeries && int.Parse(year.Value, CultureInfo.InvariantCulture) >= releaseYear.Value)) return false;
         }
         return true;
     }

@@ -18,6 +18,8 @@ namespace LampaWin.Desktop;
 public partial class MainWindow : Window
 {
     private readonly PlayerController _player;
+    private FoodPanel? _foodPanel;
+    private string _foodProfileRoot = Path.Combine(new LampaWin.Core.AppPaths(AppContext.BaseDirectory).DataRoot, "food-webview");
     private readonly ObservableCollection<string> _sources = [];
     private IReadOnlyList<string> _sourceWarnings = [];
     private string _currentStatus = "Ожидание запуска";
@@ -44,6 +46,11 @@ public partial class MainWindow : Window
     private Point? _lastPointer;
     private double? _pendingSeekSeconds;
     private DateTimeOffset _pendingSeekStarted;
+    private double? _seekAnchorSeconds;
+    private double _seekDisplaySeconds;
+    private double _seekDurationSeconds;
+    private int _seekReadySamples;
+    private DateTimeOffset? _seekFirstReadyAt;
     private double _previewFraction;
     private CancellationTokenSource? _previewCancellation;
     private readonly Dictionary<int, BitmapSource> _previewCache = [];
@@ -73,6 +80,7 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        PlayerOverlay.SizeChanged += (_, _) => FoodPanelHost.Width = Math.Clamp(PlayerOverlay.ActualWidth * 0.4, 360, 460);
         SourcesList.ItemsSource = _sources;
         _player = new PlayerController(Dispatcher);
         _player.SetVolume(VolumeSlider.Value);
@@ -94,11 +102,16 @@ public partial class MainWindow : Window
         _controlsTimer.Tick += (_, _) => HidePlayerControls();
         _clickTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(GetDoubleClickTime()) };
         _clickTimer.Tick += (_, _) => { _clickTimer.Stop(); TogglePlayback(); };
-        _previewTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(260) };
+        _previewTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(65) };
         _previewTimer.Tick += async (_, _) =>
         {
             _previewTimer.Stop();
-            await LoadSeekPreviewAsync(_previewFraction);
+            var requested = _previewFraction;
+            await LoadSeekPreviewAsync(requested);
+            var duration = _player.MediaPlayer.Length / 1000d;
+            if (SeekPreview.Visibility == Visibility.Visible && duration > 0
+                && PreviewBucket(duration, requested) != PreviewBucket(duration, _previewFraction)
+                && !_previewCache.ContainsKey(PreviewBucket(duration, _previewFraction))) _previewTimer.Start();
         };
         Deactivated += (_, _) => { _clickTimer.Stop(); PlayerOverlay.Cursor = Cursors.Arrow; };
     }
@@ -115,6 +128,7 @@ public partial class MainWindow : Window
         Func<CoreWebView2, Task>? configureBeforeNavigation = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(profilePath);
+        _foodProfileRoot = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(profilePath))!, "food-webview");
         ArgumentNullException.ThrowIfNull(initialUri);
         if (!initialUri.IsAbsoluteUri || initialUri.Scheme != Uri.UriSchemeHttp)
             throw new ArgumentException("Каталог должен открываться по локальному HTTP-адресу.", nameof(initialUri));
@@ -223,6 +237,9 @@ public partial class MainWindow : Window
             PlayerSettingsPanel.Visibility = Visibility.Collapsed;
             _lastPointer = null;
             _pendingSeekSeconds = null;
+            _seekAnchorSeconds = null;
+            _seekReadySamples = 0;
+            _seekFirstReadyAt = null;
             SeekBufferingPanel.Visibility = Visibility.Collapsed;
             SeekPreview.Visibility = Visibility.Collapsed;
             SeekPreviewImage.Source = null;
@@ -251,16 +268,30 @@ public partial class MainWindow : Window
 
     private void OnPlaybackChanged(PlaybackProgress update)
     {
-        PlaybackChanged?.Invoke(update);
         if (update.State is PlaybackState.Playing) RefreshTracksIfChanged();
         var duration = update.DurationSeconds;
+        if (duration <= 0 && _seekAnchorSeconds is not null) duration = _seekDurationSeconds;
         var displayedPosition = update.PositionSeconds;
+        var terminal = update.State is PlaybackState.Error or PlaybackState.Ended or PlaybackState.Stopped;
+        var elapsed = Math.Max(0, (DateTimeOffset.UtcNow - _pendingSeekStarted).TotalSeconds);
+        // VLC can briefly publish the requested timestamp, then deliver queued timestamps
+        // from before the seek. Keep a timeline fence even after seek acknowledgement.
+        var staleAfterSeek = !terminal && _seekAnchorSeconds is { } anchor
+            && (update.PositionSeconds < anchor - 2 || update.PositionSeconds > anchor + elapsed + 3);
         if (_pendingSeekSeconds is { } target)
         {
-            const double tolerance = 2;
-            var terminal = update.State is PlaybackState.Error or PlaybackState.Ended or PlaybackState.Stopped;
-            if (terminal || (!update.IsBuffering && update.State is PlaybackState.Playing or PlaybackState.Paused
-                && Math.Abs(update.PositionSeconds - target) <= tolerance))
+            var ready = !staleAfterSeek && !update.IsBuffering && update.State is PlaybackState.Playing or PlaybackState.Paused
+                && Math.Abs(update.PositionSeconds - target) <= Math.Max(2, elapsed + 1);
+            if (ready)
+            {
+                _seekFirstReadyAt ??= DateTimeOffset.UtcNow;
+                _seekReadySamples++;
+            }
+            else { _seekFirstReadyAt = null; _seekReadySamples = 0; }
+            var stable = _seekReadySamples >= 2 && _seekFirstReadyAt is { } first
+                && DateTimeOffset.UtcNow - first >= TimeSpan.FromMilliseconds(400)
+                && (update.State == PlaybackState.Paused || update.PositionSeconds >= target + .2);
+            if (terminal || stable)
             {
                 _pendingSeekSeconds = null;
                 SeekBufferingPanel.Visibility = Visibility.Collapsed;
@@ -273,6 +304,9 @@ public partial class MainWindow : Window
                 SeekBufferingPanel.Visibility = Visibility.Visible;
             }
         }
+        if (terminal) _seekAnchorSeconds = null;
+        else if (staleAfterSeek) displayedPosition = _pendingSeekSeconds ?? _seekDisplaySeconds;
+        if (_seekAnchorSeconds is not null) _seekDisplaySeconds = displayedPosition;
         if (_pendingSeekSeconds is null)
         {
             SeekBufferingPanel.Visibility = update.IsBuffering && update.State is not (PlaybackState.Stopped or PlaybackState.Ended or PlaybackState.Error)
@@ -282,7 +316,8 @@ public partial class MainWindow : Window
         if (!_seeking && duration > 0)
             UpdatePosition(Math.Clamp(displayedPosition / duration, 0, 1) * PositionSlider.Maximum);
         if (!_seeking) TimeLabel.Text = $"{FormatTime(displayedPosition)} / {FormatTime(duration)}";
-        PositionSlider.IsEnabled = duration > 0 && _player.MediaPlayer.IsSeekable;
+        PlaybackChanged?.Invoke(update with { PositionSeconds = displayedPosition, IsBuffering = update.IsBuffering || _pendingSeekSeconds is not null || staleAfterSeek });
+        PositionSlider.IsEnabled = duration > 0 && (_player.MediaPlayer.IsSeekable || _seekAnchorSeconds is not null);
         if (update.State is PlaybackState.Playing)
         {
             PlayPauseButton.Content = "\uE769";
@@ -353,15 +388,34 @@ public partial class MainWindow : Window
     {
         _clickTimer.Stop();
         _seeking = true;
+        SetSeekPointerPosition(e.GetPosition(PositionSlider).X);
+        PositionSlider.Focus();
+        PositionSlider.CaptureMouse();
+        e.Handled = true;
         ShowPlayerControls();
     }
-    private void PositionSlider_MouseUp(object sender, MouseButtonEventArgs e) => CommitSeek();
+    private void PositionSlider_MouseUp(object sender, MouseButtonEventArgs e)
+    {
+        if (!_seeking) return;
+        SetSeekPointerPosition(e.GetPosition(PositionSlider).X);
+        CommitSeek();
+        PositionSlider.ReleaseMouseCapture();
+        e.Handled = true;
+    }
+    private void SetSeekPointerPosition(double x)
+    {
+        // Own the pointer-to-value mapping instead of committing a value before WPF's
+        // Track/Thumb has finished processing the same routed mouse event.
+        var usableWidth = Math.Max(1, PositionSlider.ActualWidth - 12);
+        UpdatePosition(Math.Clamp((x - 6) / usableWidth, 0, 1) * PositionSlider.Maximum);
+    }
     private void PositionSlider_LostCapture(object sender, MouseEventArgs e) => CommitSeek();
     private void CommitSeek()
     {
         if (!_seeking) return;
         SeekToFraction(PositionSlider.Value / PositionSlider.Maximum);
         _seeking = false;
+        if (PositionSlider.IsMouseCaptured) PositionSlider.ReleaseMouseCapture();
         ShowPlayerControls();
     }
     private void PositionSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
@@ -373,6 +427,8 @@ public partial class MainWindow : Window
     }
     private void PositionSlider_MouseMove(object sender, MouseEventArgs e)
     {
+        if (_seeking && Mouse.LeftButton == MouseButtonState.Pressed)
+            SetSeekPointerPosition(e.GetPosition(PositionSlider).X);
         var duration = _player.MediaPlayer.Length / 1000d;
         if (duration <= 0 || PositionSlider.ActualWidth <= 0) return;
         var x = Math.Clamp(e.GetPosition(PositionSlider).X, 0, PositionSlider.ActualWidth);
@@ -391,8 +447,8 @@ public partial class MainWindow : Window
             SeekPreviewImage.Source = null;
             SeekPreviewLoading.Text = "Загрузка кадра…";
             SeekPreviewLoading.Visibility = Visibility.Visible;
-            _previewTimer.Stop();
-            _previewTimer.Start();
+            // Throttle rather than debounce: continuous pointer movement must not starve frames.
+            if (!_previewTimer.IsEnabled) _previewTimer.Start();
         }
     }
     private void PositionSlider_MouseLeave(object sender, MouseEventArgs e)
@@ -416,26 +472,21 @@ public partial class MainWindow : Window
             SeekPreviewLoading.Visibility = Visibility.Collapsed;
             return;
         }
-        _previewCancellation?.Cancel();
+        // Let one frame finish; coalesce pointer changes to the latest target instead
+        // of cancelling the decoder every 65ms and never receiving any frame.
+        if (_previewCancellation is not null) return;
         using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(8));
         _previewCancellation = cancellation;
         try
         {
-            var bytes = await _player.CapturePreviewAsync(Math.Clamp(bucket * 2d / duration, 0, 1), cancellation.Token);
+            var image = await _player.CapturePreviewAsync(Math.Clamp(bucket * 2d / duration, 0, 1), cancellation.Token);
             cancellation.Token.ThrowIfCancellationRequested();
-            if (bytes is null || bytes.Length == 0)
+            if (image is null)
             {
                 SeekPreviewLoading.Text = "Кадр пока недоступен";
                 return;
             }
-            using var stream = new MemoryStream(bytes, writable: false);
-            var image = new BitmapImage();
-            image.BeginInit();
-            image.CacheOption = BitmapCacheOption.OnLoad;
-            image.StreamSource = stream;
-            image.EndInit();
-            image.Freeze();
-            if (_previewCache.Count >= 24) _previewCache.Remove(_previewCache.Keys.First());
+            if (_previewCache.Count >= 128) _previewCache.Remove(_previewCache.Keys.First());
             _previewCache[bucket] = image;
             if (SeekPreview.Visibility == Visibility.Visible && PreviewBucket(duration, _previewFraction) == bucket)
             {
@@ -454,6 +505,11 @@ public partial class MainWindow : Window
         fraction = Math.Clamp(fraction, 0, 1);
         _pendingSeekSeconds = duration * fraction;
         _pendingSeekStarted = DateTimeOffset.UtcNow;
+        _seekAnchorSeconds = _pendingSeekSeconds;
+        _seekDisplaySeconds = _pendingSeekSeconds.Value;
+        _seekDurationSeconds = duration;
+        _seekReadySamples = 0;
+        _seekFirstReadyAt = null;
         UpdatePosition(fraction * PositionSlider.Maximum);
         TimeLabel.Text = $"{FormatTime(_pendingSeekSeconds.Value)} / {FormatTime(duration)}";
         SeekBufferingPanel.Visibility = Visibility.Visible;
@@ -495,6 +551,7 @@ public partial class MainWindow : Window
     }
     private void PlayerSettings_Click(object sender, RoutedEventArgs e)
     {
+        FoodPanelHost.Visibility = Visibility.Collapsed;
         PlayerSettingsPanel.Visibility = PlayerSettingsPanel.Visibility == Visibility.Visible ? Visibility.Collapsed : Visibility.Visible;
         ShowPlayerControls();
     }
@@ -551,6 +608,25 @@ public partial class MainWindow : Window
             foreground.Hide();
     }
 
+    private void Food_Click(object sender, RoutedEventArgs e)
+    {
+        if (_foodPanel is null)
+        {
+            _foodPanel = new FoodPanel(_foodProfileRoot, uri =>
+            {
+                if (_fullscreen) ToggleFullscreen();
+                try { Process.Start(new ProcessStartInfo(uri.AbsoluteUri) { UseShellExecute = true }); }
+                catch (Exception) { FooterStatus.Text = "Не удалось открыть браузер."; }
+            });
+            _foodPanel.CloseRequested += () => { FoodPanelHost.Visibility = Visibility.Collapsed; PlayerOverlay.Focus(); };
+            FoodPanelHost.Child = _foodPanel;
+        }
+        PlayerSettingsPanel.Visibility = Visibility.Collapsed;
+        FoodPanelHost.Width = Math.Clamp(PlayerOverlay.ActualWidth * 0.4, 360, 460);
+        FoodPanelHost.Visibility = FoodPanelHost.Visibility == Visibility.Visible ? Visibility.Collapsed : Visibility.Visible;
+        ShowPlayerControls();
+    }
+
     private void Player_MouseMove(object sender, MouseEventArgs e)
     {
         var point = e.GetPosition(PlayerOverlay);
@@ -596,7 +672,7 @@ public partial class MainWindow : Window
     {
         if (PlayerPage.Visibility != Visibility.Visible) { _controlsTimer.Stop(); return; }
         if (!_player.MediaPlayer.IsPlaying || AudioTracks.IsDropDownOpen || SubtitleTracks.IsDropDownOpen || _seeking
-            || PlayerSettingsPanel.Visibility == Visibility.Visible || PlayerBottomBar.IsMouseOver || PlayerTopBar.IsMouseOver
+            || FoodPanelHost.Visibility == Visibility.Visible || PlayerSettingsPanel.Visibility == Visibility.Visible || PlayerBottomBar.IsMouseOver || PlayerTopBar.IsMouseOver
             || (_keyboardNavigation && (PlayerBottomBar.IsKeyboardFocusWithin || PlayerTopBar.IsKeyboardFocusWithin))) return;
         _controlsTimer.Stop();
         _controlsVisible = false;
@@ -620,12 +696,16 @@ public partial class MainWindow : Window
         _clickTimer.Stop();
         _seeking = false;
         _pendingSeekSeconds = null;
+        _seekAnchorSeconds = null;
+        _seekReadySamples = 0;
+        _seekFirstReadyAt = null;
         SeekBufferingPanel.Visibility = Visibility.Collapsed;
         _previewTimer.Stop();
         _previewCancellation?.Cancel();
         _keyboardNavigation = false;
         PlayerOverlay.Cursor = Cursors.Arrow;
         PlayerSettingsPanel.Visibility = Visibility.Collapsed;
+        FoodPanelHost.Visibility = Visibility.Collapsed;
         SeekPreview.Visibility = Visibility.Collapsed;
         _controlsVisible = true;
         AnimateControls(1);
@@ -716,6 +796,11 @@ public partial class MainWindow : Window
     private void Window_KeyDown(object sender, KeyEventArgs e)
     {
         if (e.Handled) return;
+        if (FoodPanelHost.Visibility == Visibility.Visible)
+        {
+            if (e.Key == Key.Escape) { FoodPanelHost.Visibility = Visibility.Collapsed; PlayerOverlay.Focus(); e.Handled = true; return; }
+            if (FoodPanelHost.IsKeyboardFocusWithin) return;
+        }
         if (PlayerPage.Visibility == Visibility.Visible)
         {
             ShowPlayerControls();
@@ -740,6 +825,7 @@ public partial class MainWindow : Window
 
     private void Window_Closed(object? sender, EventArgs e)
     {
+        _foodPanel?.Dispose();
         _controlsTimer.Stop();
         _clickTimer.Stop();
         _previewTimer.Stop();

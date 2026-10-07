@@ -47,6 +47,7 @@ internal sealed class SmokeApp(string[] args) : Application
     private void Click(string name) => Element<Button>(name).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
     protected override async void OnStartup(StartupEventArgs e)
     {
+        ShutdownMode = ShutdownMode.OnExplicitShutdown;
         var report = Path.GetFullPath(args[1]);
         Directory.CreateDirectory(Path.GetDirectoryName(report)!);
         try
@@ -62,6 +63,18 @@ internal sealed class SmokeApp(string[] args) : Application
                 WindowStartupLocation = WindowStartupLocation.Manual, Left = -30000, Top = -30000 };
             MainWindow = _window;
             _window.Show();
+            if (args.Contains("--food-write") || args.Contains("--food-read") || args.Contains("--food-sites"))
+            {
+                await RunFoodProfileAsync(report);
+                _window.Close(); Shutdown(0); return;
+            }
+            if (args.Contains("--preview-speed"))
+            {
+                await RunPreviewSpeedAsync(report);
+                _window.Close();
+                Shutdown(0);
+                return;
+            }
             if (args.Contains("--delayed-stream"))
             {
                 await RunDelayedStreamAsync(report);
@@ -84,6 +97,25 @@ internal sealed class SmokeApp(string[] args) : Application
             var foregroundWindow = Window.GetWindow(overlay)!;
             Check(Window.GetWindow(overlay) is { } host && host != _window, "controls hosted above native VLC in dedicated foreground window");
             var bottom = Element<Border>("PlayerBottomBar");
+            Click("FoodButton");
+            await Task.Delay(150);
+            var foodHost = Element<Border>("FoodPanelHost");
+            Check(foodHost.IsVisible && foodHost.ActualWidth >= 360 && foodHost.ActualWidth <= 460 && Window.GetWindow(foodHost) == foregroundWindow,
+                "food chooser is a compact right-side panel inside actual video foreground, not a separate window");
+            Check(Element<Button>("FoodButton").TranslatePoint(new Point(), overlay).X < Element<Button>("PlayerSettingsButton").TranslatePoint(new Point(), overlay).X,
+                "burger button is left of player settings");
+            var foodBitmap = new RenderTargetBitmap((int)foodHost.ActualWidth, (int)foodHost.ActualHeight, 96, 96, PixelFormats.Pbgra32);
+            var foodVisual = new DrawingVisual();
+            using (var drawing = foodVisual.RenderOpen()) drawing.DrawRectangle(new VisualBrush(foodHost), null, new Rect(0, 0, foodHost.ActualWidth, foodHost.ActualHeight));
+            foodBitmap.Render(foodVisual);
+            var foodPng = new PngBitmapEncoder(); foodPng.Frames.Add(BitmapFrame.Create(foodBitmap));
+            using (var imageFile = File.Create(Path.ChangeExtension(report, ".food.png"))) foodPng.Save(imageFile);
+            Call("HidePlayerControls");
+            await Task.Delay(250);
+            Check(bottom.Opacity > .99, "food panel keeps player controls accessible");
+            Click("FoodButton");
+            var actualPlayer = (PlayerController)typeof(MainWindow).GetField("_player", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(_window)!;
+            Check(!foodHost.IsVisible && actualPlayer.MediaPlayer.IsPlaying, "closing food panel leaves film playing");
             Check(bottom.IsVisible && bottom.ActualWidth > 500, "overlay controls laid out over playing video");
             Check(overlay.InputHitTest(new Point(overlay.ActualWidth / 2, overlay.ActualHeight / 2)) == Element<Border>("VideoClickSurface"), "video surface receives mouse input above native HWND");
             Call("HidePlayerControls");
@@ -97,7 +129,11 @@ internal sealed class SmokeApp(string[] args) : Application
             Call("HidePlayerControls");
             await Task.Delay(250);
             Check(bottom.Opacity > .99, "paused playback keeps controls visible");
-            Call("PositionSlider_MouseDown", Element<Slider>("PositionSlider"), new MouseButtonEventArgs(Mouse.PrimaryDevice, 0, MouseButton.Left));
+            Call("PositionSlider_MouseDown", Element<Slider>("PositionSlider"), new MouseButtonEventArgs(Mouse.PrimaryDevice, 0, MouseButton.Left)
+                { RoutedEvent = Mouse.PreviewMouseDownEvent });
+            Call("SetSeekPointerPosition", Element<Slider>("PositionSlider").ActualWidth * .75);
+            Check(Element<Slider>("PositionSlider").Value > 740 && Element<Slider>("PositionSlider").Value < 760,
+                "pointer click computes the new slider position before the seek commits");
             Element<Slider>("PositionSlider").Value = 500;
             Call("CommitSeek");
             Check(Math.Abs(Element<Slider>("PositionSlider").Value - 500) < .1
@@ -106,6 +142,7 @@ internal sealed class SmokeApp(string[] args) : Application
             await Task.Delay(300);
             Check(Element<TextBlock>("TimeLabel").Text.Contains("00:06"), "timeline drag seeks native player to midpoint");
             var session = "stalled-ui-fixture";
+            Call("SeekToFraction", .5d);
             typeof(MainWindow).GetField("_pendingSeekSeconds", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(_window, 6d);
             typeof(MainWindow).GetField("_pendingSeekStarted", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(_window, DateTimeOffset.UtcNow.AddSeconds(-25));
             Call("OnPlaybackChanged", new PlaybackProgress(session, 0, 12, PlaybackState.Opening, true));
@@ -116,8 +153,34 @@ internal sealed class SmokeApp(string[] args) : Application
             Check(Element<StackPanel>("SeekBufferingPanel").IsVisible,
                 "native target timestamp while still buffering does not report a completed seek");
             Call("OnPlaybackChanged", new PlaybackProgress(session, 6, 12, PlaybackState.Playing));
+            Check(Element<StackPanel>("SeekBufferingPanel").IsVisible,
+                "a single optimistic VLC timestamp cannot acknowledge a seek");
+            Call("OnPlaybackChanged", new PlaybackProgress(session, 0, 12, PlaybackState.Playing));
+            Check(Math.Abs(Element<Slider>("PositionSlider").Value - 500) < .1,
+                "old progress after an optimistic target timestamp cannot return the slider to its origin");
+            Call("OnPlaybackChanged", new PlaybackProgress(session, 6.3, 12, PlaybackState.Playing));
+            typeof(MainWindow).GetField("_seekFirstReadyAt", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .SetValue(_window, (DateTimeOffset?)DateTimeOffset.UtcNow.AddSeconds(-1));
+            Call("OnPlaybackChanged", new PlaybackProgress(session, 6.4, 12, PlaybackState.Playing));
             Check(!Element<StackPanel>("SeekBufferingPanel").IsVisible,
-                "seek buffering clears after target position becomes ready");
+                "seek buffering clears only after stable advancing progress at the target");
+            PlaybackProgress? forwarded = null;
+            Action<PlaybackProgress> captureForwarded = progress => forwarded = progress;
+            _window.PlaybackChanged += captureForwarded;
+            Call("OnPlaybackChanged", new PlaybackProgress(session, 0, 12, PlaybackState.Playing));
+            Check(Element<Slider>("PositionSlider").Value >= 500,
+                "queued pre-seek timestamps remain fenced out after acknowledgement");
+            Check(forwarded is { PositionSeconds: >= 6, IsBuffering: true },
+                "stale timestamps cannot roll back the progress forwarded to Lampa history");
+            _window.PlaybackChanged -= captureForwarded;
+            Call("SeekToFraction", .1d);
+            Call("OnPlaybackChanged", new PlaybackProgress(session, 1.5, 12, PlaybackState.Playing));
+            typeof(MainWindow).GetField("_seekFirstReadyAt", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .SetValue(_window, (DateTimeOffset?)DateTimeOffset.UtcNow.AddSeconds(-1));
+            Call("OnPlaybackChanged", new PlaybackProgress(session, 1.6, 12, PlaybackState.Playing));
+            Call("OnPlaybackChanged", new PlaybackProgress(session, 6, 12, PlaybackState.Playing));
+            Check(Element<Slider>("PositionSlider").Value < 200,
+                "backward seeks also reject queued timestamps from the previous later position");
             Element<Border>("SeekPreview").Visibility = Visibility.Visible;
             typeof(MainWindow).GetField("_previewFraction", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(_window, .5d);
             var previewTask = (Task)typeof(MainWindow).GetMethod("LoadSeekPreviewAsync", BindingFlags.Instance | BindingFlags.NonPublic)!
@@ -177,7 +240,8 @@ internal sealed class SmokeApp(string[] args) : Application
             _window.Play(new MediaRequest(FixtureUri, "Завершение серии", 0, Guid.NewGuid().ToString()));
             await Task.Delay(1500);
             foregroundWindow = Window.GetWindow(overlay)!;
-            Call("PositionSlider_MouseDown", Element<Slider>("PositionSlider"), new MouseButtonEventArgs(Mouse.PrimaryDevice, 0, MouseButton.Left));
+            Call("PositionSlider_MouseDown", Element<Slider>("PositionSlider"), new MouseButtonEventArgs(Mouse.PrimaryDevice, 0, MouseButton.Left)
+                { RoutedEvent = Mouse.PreviewMouseDownEvent });
             Element<Slider>("PositionSlider").Value = 950;
             Call("CommitSeek");
             await ended.Task.WaitAsync(TimeSpan.FromSeconds(15));
@@ -251,6 +315,112 @@ internal sealed class SmokeApp(string[] args) : Application
             "replacement video plays after cancellation of blocked preview");
         await File.WriteAllTextAsync(report, JsonSerializer.Serialize(new { success = true,
             blockedRequests = source.BlockedRequests, checks = _checks }, new JsonSerializerOptions { WriteIndented = true }));
+    }
+
+    private async Task RunFoodProfileAsync(string report)
+    {
+        _window.Play(new MediaRequest(FixtureUri, "Food panel fixture", 0, Guid.NewGuid().ToString()));
+        await Task.Delay(500);
+        var root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../.."));
+        var profile = Path.Combine(root, ".cache/food-profile-smoke/burgerking");
+        var panel = new FoodPanel(Path.GetDirectoryName(profile)!, _ => throw new InvalidOperationException("No external browser expected"));
+        var host = Element<Border>("FoodPanelHost"); host.Child = panel; host.Visibility = Visibility.Visible;
+        if (args.Contains("--food-sites"))
+        {
+            Click("PlayPauseButton");
+            var observations = new List<object>();
+            foreach (var service in LampaWin.Core.FoodServices.All)
+            {
+                await panel.SelectServiceAsync(service).WaitAsync(TimeSpan.FromSeconds(25));
+                var browsers = (Dictionary<string, Microsoft.Web.WebView2.Wpf.WebView2CompositionControl>)typeof(FoodPanel).GetField("_browsers", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(panel)!;
+                var site = browsers[service.Id].CoreWebView2;
+                await Task.Delay(12000);
+                observations.Add(new { service = service.Title, page = await site.ExecuteScriptAsync("JSON.stringify({title:document.title,ready:document.readyState,bodyLength:document.body?.innerText.length,inputs:document.querySelectorAll('input').length})") });
+            }
+            panel.Dispose();
+            File.WriteAllText(report, JsonSerializer.Serialize(new { observations, authenticatedCheckoutTested = false }, new JsonSerializerOptions { WriteIndented = true }));
+            return;
+        }
+        var sites = (Grid)typeof(FoodPanel).GetField("_sites", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(panel)!;
+        sites.Visibility = Visibility.Visible;
+        var view = new Microsoft.Web.WebView2.Wpf.WebView2CompositionControl(); sites.Children.Add(view);
+        ((StackPanel)typeof(FoodPanel).GetField("_picker", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(panel)!).Visibility = Visibility.Collapsed;
+        var environment = await Microsoft.Web.WebView2.Core.CoreWebView2Environment.CreateAsync(null, profile);
+        await ((Task)typeof(FoodPanel).GetMethod("InitializeAsync", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(panel, [view, environment])!).WaitAsync(TimeSpan.FromSeconds(25));
+        var core = view.CoreWebView2;
+        core.SetVirtualHostNameToFolderMapping("food-test.example", Path.Combine(root, "tools/testing/food-fixture"), Microsoft.Web.WebView2.Core.CoreWebView2HostResourceAccessKind.DenyCors);
+        var loaded = new TaskCompletionSource(); core.NavigationCompleted += (_, e) => { if (e.IsSuccess) loaded.TrySetResult(); };
+        core.Navigate("https://food-test.example/index.html");
+        await loaded.Task.WaitAsync(TimeSpan.FromSeconds(20));
+        await Task.Delay(1000);
+        var webBitmap = new RenderTargetBitmap((int)view.ActualWidth, (int)view.ActualHeight, 96, 96, PixelFormats.Pbgra32);
+        var webVisual = new DrawingVisual();
+        using (var drawing = webVisual.RenderOpen()) drawing.DrawRectangle(new VisualBrush(view), null, new Rect(0, 0, view.ActualWidth, view.ActualHeight));
+        webBitmap.Render(webVisual);
+        var centerPixel = new byte[4];
+        webBitmap.CopyPixels(new Int32Rect(webBitmap.PixelWidth / 2, webBitmap.PixelHeight / 2, 1, 1), centerPixel, 4, 0);
+        Check(centerPixel[1] > 120 && centerPixel[2] < 80 && centerPixel[0] < 140, "web page pixels render inside transparent VLC foreground, not just an invisible DOM");
+        if (args.Contains("--food-write"))
+        {
+            await core.ExecuteScriptAsync("localStorage.setItem('food-smoke','persisted'); document.cookie='foodSmoke=persisted; max-age=86400; secure; samesite=lax; path=/';");
+            Check(true, "dummy food session stored in isolated persistent profile");
+        }
+        else
+        {
+            var state = await core.ExecuteScriptAsync("JSON.stringify({storage:localStorage.getItem('food-smoke'),cookie:document.cookie})");
+            Check(state.Contains("persisted") && state.Contains("foodSmoke="), "food cookie and localStorage survived a full process restart");
+        }
+        Check(!core.Settings.AreHostObjectsAllowed && !core.Settings.IsWebMessageEnabled && !core.Settings.IsPasswordAutosaveEnabled && core.IsMuted,
+            "food browser has no catalog bridge, no password autosave, and no interfering audio");
+        var blocked = new TaskCompletionSource(); core.NavigationStarting += (_, e) => { if (e.Uri.StartsWith("http://127.0.0.1")) blocked.TrySetResult(); };
+        core.Navigate("http://127.0.0.1:8090/"); await blocked.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await Task.Delay(200);
+        Check(core.Source.StartsWith("https://food-test.example"), "food browser blocked navigation to local TorrServer");
+        await core.ExecuteScriptAsync("window.open('https://food-test.example/index.html','foodAuthTest')");
+        var popupViews = (List<Microsoft.Web.WebView2.Wpf.WebView2CompositionControl>)typeof(FoodPanel).GetField("_popups", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(panel)!;
+        for (var attempt = 0; attempt < 50 && (popupViews.Count == 0 || popupViews[0].CoreWebView2 is null); attempt++) await Task.Delay(100);
+        Check(popupViews.Count == 1 && popupViews[0].CoreWebView2 is not null && Window.GetWindow(popupViews[0]) == Window.GetWindow(host), "auth popup remains inside the food panel");
+        await Task.Delay(300);
+        await popupViews[0].CoreWebView2.ExecuteScriptAsync("window.close()");
+        await Task.Delay(300);
+        Check(popupViews.Count == 0 && view.Visibility == Visibility.Visible, "closing embedded auth popup restores its original service browser");
+        view.Dispose(); panel.Dispose();
+        File.WriteAllText(report, JsonSerializer.Serialize(new { success = true, checks = _checks }, new JsonSerializerOptions { WriteIndented = true }));
+    }
+
+    private async Task RunPreviewSpeedAsync(string report)
+    {
+        var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _window.PlaybackChanged += update => { if (update.State == PlaybackState.Playing && update.DurationSeconds > 0) ready.TrySetResult(); };
+        _window.Play(new MediaRequest(FixtureUri, "Preview latency test", 0, "preview-speed"));
+        await ready.Task.WaitAsync(TimeSpan.FromSeconds(15));
+        Click("PlayPauseButton");
+        Element<Border>("SeekPreview").Visibility = Visibility.Visible;
+        var timings = new List<double>();
+        var images = new List<BitmapSource>();
+        foreach (var fraction in new[] { .2d, .4d, .6d, .3d, .6d })
+        {
+            typeof(MainWindow).GetField("_previewFraction", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(_window, fraction);
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            var task = (Task)typeof(MainWindow).GetMethod("LoadSeekPreviewAsync", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .Invoke(_window, new object[] { fraction })!;
+            await task.WaitAsync(TimeSpan.FromSeconds(10));
+            watch.Stop();
+            timings.Add(watch.Elapsed.TotalMilliseconds);
+            Check(Element<Image>("SeekPreviewImage").Source is BitmapSource, $"target {fraction:P0} returns a frame");
+            images.Add((BitmapSource)Element<Image>("SeekPreviewImage").Source);
+        }
+        Check(timings.Skip(1).Take(3).All(milliseconds => milliseconds < 750), "warm uncached target frames appear within 750ms on the local fixture");
+        Check(timings[^1] < 50 && ReferenceEquals(images[2], images[4]), "cached hover returns the exact image within 50ms without decoding");
+        var hashes = images.Take(4).Select(bitmap =>
+        {
+            var pixels = new byte[bitmap.PixelWidth * bitmap.PixelHeight * 4];
+            bitmap.CopyPixels(pixels, bitmap.PixelWidth * 4, 0);
+            return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(pixels));
+        }).ToArray();
+        Check(hashes.Distinct().Count() >= 3, "seeks produce distinct decoded frames rather than stale snapshots");
+        await File.WriteAllTextAsync(report, JsonSerializer.Serialize(new { success = true, milliseconds = timings, frameHashes = hashes, checks = _checks },
+            new JsonSerializerOptions { WriteIndented = true }));
     }
 
     private async Task RunExternalVideoAsync(string report)

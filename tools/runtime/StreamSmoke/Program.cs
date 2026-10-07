@@ -70,21 +70,23 @@ try
         Console.WriteLine("TorrServer uses 100 peer connections, unlimited download rate and 50% preload cache.");
     }
     var link = Uri.EscapeDataString(fixtureTorrent.AbsoluteUri);
-    if (args.Contains("--player-ui"))
+    if (args.Contains("--player-ui") || args.Contains("--preview-speed"))
     {
         await using var gateway = new LocalGateway(new AppPaths(root, data), snapshot);
         await gateway.StartAsync();
         if (!gateway.TryCreateMediaUri(new Uri(gateway.Origin, $"torrserver/stream?link={link}&index=1&play").AbsoluteUri, out var media))
             throw new InvalidOperationException("Could not create isolated torrent playback capability.");
-        var report = Path.Combine(root, "artifacts", "torrent-player-ui-smoke.json");
+        var report = Path.Combine(root, "artifacts", args.Contains("--preview-speed")
+            ? "torrent-preview-speed.json" : "torrent-player-ui-smoke.json");
         var start = new ProcessStartInfo(Path.Combine(root, ".tools", "dotnet", "dotnet.exe"))
         {
             WorkingDirectory = root, UseShellExecute = false, CreateNoWindow = true,
             RedirectStandardOutput = true, RedirectStandardError = true
         };
-        start.ArgumentList.Add(Path.Combine(root, "tools", "testing", "PlayerUiSmoke", "bin", "Debug", "net10.0-windows", "PlayerUiSmoke.dll"));
+        start.ArgumentList.Add(Path.Combine(root, "tools", "testing", "PlayerUiSmoke", "bin", "Debug", "net10.0-windows10.0.17763.0", "PlayerUiSmoke.dll"));
         start.ArgumentList.Add(media.AbsoluteUri);
         start.ArgumentList.Add(report);
+        if (args.Contains("--preview-speed")) start.ArgumentList.Add("--preview-speed");
         using var ui = Process.Start(start) ?? throw new InvalidOperationException("Could not start torrent player UI smoke.");
         var output = ui.StandardOutput.ReadToEndAsync();
         var errors = ui.StandardError.ReadToEndAsync();

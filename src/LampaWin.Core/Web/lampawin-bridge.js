@@ -71,6 +71,24 @@
                 torrserver_auth: false, player: 'lampa', parse_timeout: 60
             };
             for (const [name, value] of Object.entries(settings)) Lampa.Storage.set(name, value);
+            // Jackett gets only the text query. Keep the selected item's identity in
+            // our own gateway context, so same-name remakes do not leak into this screen.
+            const jquery = window.jQuery || window.$;
+            if (jquery && typeof jquery.ajaxPrefilter === 'function') jquery.ajaxPrefilter(options => {
+                try {
+                    const url = new URL(options.url, origin);
+                    if (url.origin !== origin || !url.pathname.startsWith('/jackett/') || !url.pathname.endsWith('/results')) return;
+                    const active = Lampa.Activity && Lampa.Activity.active();
+                    if (!active || active.component !== 'torrents' || !active.movie) return;
+                    const movie = active.movie;
+                    const date = movie.first_air_date || movie.release_date || '';
+                    const year = Number(String(date).slice(0, 4));
+                    if (!Number.isInteger(year) || year < 1800 || year > 2100) return;
+                    url.searchParams.set('lampawin_year', String(year));
+                    url.searchParams.set('lampawin_kind', movie.first_air_date || movie.number_of_seasons ? 'tv' : 'movie');
+                    options.url = url.href;
+                } catch (_) { /* User-entered searches without catalog context still work. */ }
+            });
             Lampa.Player.listener.follow('create', event => {
                 if (!event || !event.data || typeof event.abort !== 'function') return;
                 event.abort();

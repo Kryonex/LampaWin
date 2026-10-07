@@ -54,7 +54,7 @@ $jackettTargetDir = Join-Path $publishComponents 'jackett'
 New-Item -ItemType Directory -Force $jackettTargetDir | Out-Null
 Get-ChildItem -LiteralPath $jackettSourceDir | Where-Object Name -ne 'Jackett' | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $jackettTargetDir -Recurse -Force }
 Copy-Item -LiteralPath (Join-Path $root 'THIRD-PARTY-NOTICES.md') -Destination (Join-Path $publish 'THIRD-PARTY-NOTICES.md') -Force
-foreach ($rootDocument in @('README.md','LICENSE','VALIDATION.md')) {
+foreach ($rootDocument in @('README.md','LICENSE','VALIDATION.md','FOOD-ORDERING.md')) {
     $documentPath = Join-Path $root $rootDocument
     if (!(Test-Path -LiteralPath $documentPath)) { throw "Required release document is missing: $rootDocument" }
     Copy-Item -LiteralPath $documentPath -Destination (Join-Path $publish $rootDocument) -Force
@@ -105,7 +105,7 @@ $sourceStageFull = [IO.Path]::GetFullPath($sourceStage)
 if (!$sourceStageFull.StartsWith($artifactsRoot + [IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)) { throw "Refusing to create source staging outside artifacts: $sourceStageFull" }
 if (Test-Path -LiteralPath $sourceStageFull) { Remove-Item -LiteralPath $sourceStageFull -Recurse -Force }
 New-Item -ItemType Directory -Force $sourceStageFull | Out-Null
-foreach ($relative in @('src','tests','tools/packaging','tools/runtime','tools/testing','installer','config','licenses','releases','THIRD-PARTY-NOTICES.md','README.md','VALIDATION.md','LICENSE','global.json','Directory.Build.props','NuGet.Config','LampaWin.sln')) {
+foreach ($relative in @('src','tests','tools/packaging','tools/runtime','tools/testing','installer','config','licenses','releases','THIRD-PARTY-NOTICES.md','README.md','VALIDATION.md','FOOD-ORDERING.md','LICENSE','global.json','Directory.Build.props','NuGet.Config','LampaWin.sln')) {
     $from = Join-Path $root $relative
     if (!(Test-Path -LiteralPath $from)) { continue }
     if ((Get-Item -LiteralPath $from).PSIsContainer) {

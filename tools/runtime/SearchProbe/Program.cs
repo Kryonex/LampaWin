@@ -20,8 +20,11 @@ try
     using var client = new HttpClient(new HttpClientHandler { CookieContainer = new CookieContainer() }) { Timeout = TimeSpan.FromSeconds(110) };
     using var login = await client.GetAsync(gateway.LoginUri);
     login.EnsureSuccessStatusCode();
+    var yearArgument = args.FirstOrDefault(argument => argument.StartsWith("--year=", StringComparison.Ordinal));
+    var contextQuery = yearArgument is not null && int.TryParse(yearArgument[7..], out var selectedYear)
+        ? "&lampawin_year=" + selectedYear + "&lampawin_kind=tv" : string.Empty;
     using var response = await client.GetAsync(new Uri(gateway.Origin,
-        "jackett/api/v2.0/indexers/all/results?Query=" + Uri.EscapeDataString(args[1]) + "&Category[]=2000&Category[]=5000"));
+        "jackett/api/v2.0/indexers/all/results?Query=" + Uri.EscapeDataString(args[1]) + "&Category[]=2000&Category[]=5000" + contextQuery));
     response.EnsureSuccessStatusCode();
     using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
     var results = body.RootElement.GetProperty("Results");
@@ -74,7 +77,7 @@ try
             throw new InvalidOperationException("No media capability for external torrent.");
         var start = new ProcessStartInfo(Path.Combine(root, ".tools", "dotnet", "dotnet.exe"))
         { WorkingDirectory = root, UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
-        start.ArgumentList.Add(Path.Combine(root, "tools", "testing", "PlayerUiSmoke", "bin", "Debug", "net10.0-windows", "PlayerUiSmoke.dll"));
+        start.ArgumentList.Add(Path.Combine(root, "tools", "testing", "PlayerUiSmoke", "bin", "Debug", "net10.0-windows10.0.17763.0", "PlayerUiSmoke.dll"));
         start.ArgumentList.Add(media.AbsoluteUri);
         start.ArgumentList.Add(Path.Combine(root, "artifacts", "external-torrent-player.json"));
         start.ArgumentList.Add("--external-video");

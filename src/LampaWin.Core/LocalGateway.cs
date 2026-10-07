@@ -171,7 +171,8 @@ public sealed class LocalGateway : IAsyncDisposable
     {
         var current = Volatile.Read(ref _runtime);
         var baseUri = backend == Backend.TorrServer ? current.TorrServerBaseUri : current.JackettBaseUri;
-        var query = context.Request.Query.Where(x => backend != Backend.Jackett || !x.Key.Equals("apikey", StringComparison.OrdinalIgnoreCase))
+        var query = context.Request.Query.Where(x => backend != Backend.Jackett ||
+            !x.Key.Equals("apikey", StringComparison.OrdinalIgnoreCase) && !x.Key.StartsWith("lampawin_", StringComparison.OrdinalIgnoreCase))
             .SelectMany(x => x.Value.Select(value => new KeyValuePair<string, string?>(x.Key, value))).ToList();
         if (backend == Backend.Jackett)
         {
@@ -270,7 +271,9 @@ public sealed class LocalGateway : IAsyncDisposable
                     var searchQuery = context.Request.Query["Query"].FirstOrDefault()
                         ?? context.Request.Query["query"].FirstOrDefault()
                         ?? context.Request.Query["q"].FirstOrDefault();
-                    TorrentResultPolicy.FilterAndRank(items, searchQuery);
+                    var releaseYear = int.TryParse(context.Request.Query["lampawin_year"], out var year) && year is >= 1800 and <= 2100
+                        ? (int?)year : null;
+                    TorrentResultPolicy.FilterAndRank(items, searchQuery, releaseYear, context.Request.Query["lampawin_kind"] == "tv");
                     for (var i = items.Count - 1; i >= 0; i--)
                     {
                         var item = items[i];

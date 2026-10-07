@@ -6,18 +6,20 @@ const { randomUUID } = require('node:crypto');
 const script = fs.readFileSync(require('node:path').join(__dirname, '../src/LampaWin.Core/Web/lampawin-bridge.js'), 'utf8');
 let failures = 1;
 const sent = [], handlers = {}, settings = {}, cache = new Map();
-let create, storageChanged;
+let create, storageChanged, searchPrefilter;
 const intervals = [];
 const context = {
     location: { origin: 'http://127.0.0.1:12345' }, crypto: { randomUUID },
     __lampawinOrigin: 'http://127.0.0.1:12345', console,
-    appready: true,
+    appready: true, URL,
+    jQuery: { ajaxPrefilter: callback => { searchPrefilter = callback; } },
     chrome: { webview: { postMessage: m => sent.push(m), addEventListener: (name, cb) => { handlers[name] = cb; } } },
     localStorage: { get length() { return cache.size; }, key: i => [...cache.keys()][i], getItem: k => cache.get(k), setItem: (k, v) => cache.set(k, v) },
     setTimeout: () => 1, clearTimeout: () => {}, setInterval: cb => { intervals.push(cb); return intervals.length; }, clearInterval: () => {},
     addEventListener: () => {},
     fetch: async () => { if (failures-- > 0) throw Error('temporary config failure'); return { ok: true, json: async () => ({ jackettUrl: '/jackett', jackettKey: 'managed', torrServerUrl: '/torrserver', indexers: ['fixture'], warnings: [] }) }; },
     Lampa: {
+        Activity: { active: () => ({ component: 'torrents', movie: { first_air_date: '2025-07-13', number_of_seasons: 1 } }) },
         Storage: { set: (k, v) => { settings[k] = v; }, listener: { follow: (_, cb) => { storageChanged = cb; } } },
         Player: { listener: { follow: (_, cb) => { create = cb; } } },
         Torserver: { toPlayUrl: url => url }, Noty: { show: () => {} }, Select: { show: () => {}, close: () => {} }
@@ -33,6 +35,13 @@ vm.createContext(context); vm.runInContext(script, context);
     assert.equal(settings.parser_torrent_type, 'jackett');
     assert.equal(settings.torrserver_auth, false);
     assert.equal(settings.jackett_key, 'managed');
+    const searchRequest = { url: '/jackett/api/v2.0/indexers/all/results?Query=The%20Institute' };
+    searchPrefilter(searchRequest);
+    assert.equal(new URL(searchRequest.url).searchParams.get('lampawin_year'), '2025');
+    assert.equal(new URL(searchRequest.url).searchParams.get('lampawin_kind'), 'tv');
+    const externalRequest = { url: 'https://example.org/results' };
+    searchPrefilter(externalRequest);
+    assert.equal(externalRequest.url, 'https://example.org/results', 'external searches are never modified');
     let aborted = false, timeline;
     create({ data: { url: 'http://127.0.0.1:12345/torrserver/stream?link=fixture', title: 'Фильм', timeline: { time: 42, handler: (...args) => { timeline = args; } } }, abort: () => { aborted = true; } });
     assert(aborted, 'HTML player suppressed');

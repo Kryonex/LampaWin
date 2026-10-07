@@ -18,6 +18,10 @@ void Assert(bool value, string name)
     if (!value) throw new InvalidOperationException("FAILED: " + name);
     passed.Add(name); Console.WriteLine("PASS " + name);
 }
+Assert(FoodServices.All.Count == 2 && FoodServices.All.All(x => FoodServices.IsSafeNavigation(x.HomeUri.AbsoluteUri)), "food chooser uses two official HTTPS sites");
+Assert(new[] { "https://passport.yandex.ru/", "https://payments.example/3ds" }.All(FoodServices.IsSafeNavigation), "food auth and payment HTTPS redirects allowed");
+Assert(new[] { "http://eda.yandex.ru", "file:///C:/secret", "javascript:alert(1)", "https://localhost/", "https://192.168.1.8/", "https://[::1]/", "https://user:pass@eda.yandex.ru/" }.All(x => !FoodServices.IsSafeNavigation(x)), "food navigation blocks insecure/local/credential URLs");
+Assert(FoodServices.All.Select(x => FoodServices.ProfileDirectory(Path.GetTempPath(), x)).Distinct().Count() == 2, "food services have separate persistent browser profiles");
 var titlePolicyCases = JsonNode.Parse("""
     [
       {"Title":"Blue Planet 2017 1080p","Seeders":20,"Category":[5000]},
@@ -41,6 +45,20 @@ var episodeCases = JsonNode.Parse("""[{"Title":"Blue Planet S02E01","Seeders":80
 TorrentResultPolicy.FilterAndRank(episodeCases, "Blue Planet S02E03");
 Assert(episodeCases.Count == 2 && !episodeCases.Any(item => item!["Title"]!.ToString() == "Blue Planet S02E01"),
     "explicit episode search rejects other episodes and keeps inclusive episode packs");
+var instituteCases = JsonNode.Parse("""
+    [
+      {"Title":"Институт / The Institute [S01] (2025) WEB-DL-AVC","Seeders":12},
+      {"Title":"The Misfit of Demon King Academy S02E15 Institute of the Gods 1080p","Seeders":18},
+      {"Title":"[ReleaseGroup] The Institute S01 WEBRip","Seeders":10}
+    ]
+    """)!.AsArray();
+TorrentResultPolicy.FilterAndRank(instituteCases, "The Institute");
+Assert(instituteCases.Count == 2 && !instituteCases.Any(item => item!["Title"]!.ToString().Contains("Misfit")),
+    "The Institute rejects the exact unrelated anime from the user screenshot while retaining aliases and group tags");
+var remakeCases = JsonNode.Parse("""[{"Title":"The Institute (2017)","Seeders":20},{"Title":"The Institute S01 (2025)","Seeders":10},{"Title":"The Institute S02 (2026)","Seeders":5}]""")!.AsArray();
+TorrentResultPolicy.FilterAndRank(remakeCases, "The Institute", 2025, isSeries: true);
+Assert(remakeCases.Count == 2 && !remakeCases.Any(item => item!["Title"]!.ToString().Contains("2017")),
+    "selected series premiere year rejects old same-name films while retaining later seasons");
 var temporary = Path.Combine(Path.GetTempPath(), "LampaWin-tests-" + Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(Path.Combine(temporary, "components", "lampa"));
 var paths = new AppPaths(temporary, Path.Combine(temporary, "data"));

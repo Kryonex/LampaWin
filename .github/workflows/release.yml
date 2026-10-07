@@ -51,6 +51,7 @@ jobs:
             "app_version=$version" >> $env:GITHUB_OUTPUT
             Write-Host "Will build and publish release $tag."
           }
+          $global:LASTEXITCODE = 0
 
       - name: Acquire pinned app components
         if: steps.version.outputs.release_needed == 'true'

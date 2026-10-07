@@ -41,6 +41,7 @@ jobs:
             throw "Application version must use major.minor.patch format: $version"
           }
           $tag = "v$version"
+          $PSNativeCommandUseErrorActionPreference = $false
           gh release view $tag *> $null
           if ($LASTEXITCODE -eq 0) {
             "release_needed=false" >> $env:GITHUB_OUTPUT

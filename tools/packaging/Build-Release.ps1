@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([switch]$SkipInstaller,[switch]$SkipJackettPublish)
+param([switch]$SkipInstaller,[switch]$SkipJackettPublish,[string]$CandidateName = '')
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 $localDotnet = Join-Path $root '.tools/dotnet/dotnet.exe'
@@ -7,7 +7,12 @@ $dotnet = if (Test-Path $localDotnet) { $localDotnet } else { (Get-Command dotne
 $dotnetRoot = Split-Path -Parent $dotnet
 $desktop = Join-Path $root 'src/LampaWin.Desktop/LampaWin.Desktop.csproj'
 $jackettSource = Join-Path $root '.cache/jackett-source/src/Jackett.Server/Jackett.Server.csproj'
-$publish = Join-Path $root 'artifacts/publish'
+$artifactsBase = (Resolve-Path (Join-Path $root 'artifacts')).Path
+if ($CandidateName -and $CandidateName -notmatch '^[a-zA-Z0-9][a-zA-Z0-9-]{0,63}$') { throw 'CandidateName must be a simple directory name.' }
+$artifactsRoot = if ($CandidateName) { Join-Path $artifactsBase $CandidateName } else { $artifactsBase }
+New-Item -ItemType Directory -Force $artifactsRoot | Out-Null
+$publish = Join-Path $artifactsRoot 'publish'
+if ($CandidateName) { Copy-Item -LiteralPath (Join-Path $artifactsBase 'source') -Destination $artifactsRoot -Recurse -Force }
 $lgplLicense = Join-Path $root 'licenses/LGPL-2.1-or-later.txt'
 if (!(Test-Path $dotnet)) { throw "Local .NET SDK missing: $dotnet" }
 if (!(Test-Path $desktop)) { throw "Desktop project missing: $desktop" }
@@ -21,7 +26,6 @@ if (!$SkipJackettPublish) {
 }
 if (!(Test-Path (Join-Path $root 'components/jackett/JackettConsole.exe'))) { throw 'JackettConsole.exe missing from publish output' }
 
-$artifactsRoot = (Resolve-Path (Join-Path $root 'artifacts')).Path
 $publishFull = [IO.Path]::GetFullPath($publish)
 if (!$publishFull.StartsWith($artifactsRoot + [IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)) { throw "Refusing to remove publish output outside artifacts: $publishFull" }
 if (Test-Path -LiteralPath $publishFull) { Remove-Item -LiteralPath $publishFull -Recurse -Force }
@@ -50,7 +54,7 @@ $jackettTargetDir = Join-Path $publishComponents 'jackett'
 New-Item -ItemType Directory -Force $jackettTargetDir | Out-Null
 Get-ChildItem -LiteralPath $jackettSourceDir | Where-Object Name -ne 'Jackett' | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $jackettTargetDir -Recurse -Force }
 Copy-Item -LiteralPath (Join-Path $root 'THIRD-PARTY-NOTICES.md') -Destination (Join-Path $publish 'THIRD-PARTY-NOTICES.md') -Force
-foreach ($rootDocument in @('README.md','LICENSE')) {
+foreach ($rootDocument in @('README.md','LICENSE','VALIDATION.md')) {
     $documentPath = Join-Path $root $rootDocument
     if (!(Test-Path -LiteralPath $documentPath)) { throw "Required release document is missing: $rootDocument" }
     Copy-Item -LiteralPath $documentPath -Destination (Join-Path $publish $rootDocument) -Force
@@ -70,7 +74,7 @@ foreach ($copy in $licenseCopies) {
     Copy-Item -LiteralPath $copy[0] -Destination (Join-Path $licenses $copy[1]) -Force
 }
 Copy-Item -LiteralPath $lgplLicense -Destination (Join-Path $licenses 'LGPL-2.1-or-later.txt') -Force
-Copy-Item -LiteralPath $lgplLicense -Destination (Join-Path $root 'artifacts/source/LGPL-2.1-or-later.txt') -Force
+Copy-Item -LiteralPath $lgplLicense -Destination (Join-Path $artifactsRoot 'source/LGPL-2.1-or-later.txt') -Force
 @'
 MIT License
 
@@ -97,12 +101,11 @@ SOFTWARE.
 
 # Create a first-party source archive without caches, binaries, package outputs, or user state.
 $sourceStage = Join-Path $artifactsRoot 'source/LampaWin-source'
-$artifactsRoot = (Resolve-Path (Join-Path $root 'artifacts')).Path
 $sourceStageFull = [IO.Path]::GetFullPath($sourceStage)
 if (!$sourceStageFull.StartsWith($artifactsRoot + [IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)) { throw "Refusing to create source staging outside artifacts: $sourceStageFull" }
 if (Test-Path -LiteralPath $sourceStageFull) { Remove-Item -LiteralPath $sourceStageFull -Recurse -Force }
 New-Item -ItemType Directory -Force $sourceStageFull | Out-Null
-foreach ($relative in @('src','tests','tools/packaging','tools/runtime','tools/testing','installer','config','licenses','THIRD-PARTY-NOTICES.md','README.md','LICENSE','global.json','Directory.Build.props','NuGet.Config','LampaWin.sln')) {
+foreach ($relative in @('src','tests','tools/packaging','tools/runtime','tools/testing','installer','config','licenses','releases','THIRD-PARTY-NOTICES.md','README.md','VALIDATION.md','LICENSE','global.json','Directory.Build.props','NuGet.Config','LampaWin.sln')) {
     $from = Join-Path $root $relative
     if (!(Test-Path -LiteralPath $from)) { continue }
     if ((Get-Item -LiteralPath $from).PSIsContainer) {
@@ -116,12 +119,12 @@ foreach ($relative in @('src','tests','tools/packaging','tools/runtime','tools/t
         }
     } else { Copy-Item -LiteralPath $from -Destination $sourceStageFull -Force }
 }
-$firstPartySourceZip = Join-Path $root 'artifacts/source/LampaWin-source.zip'
+$firstPartySourceZip = Join-Path $artifactsRoot 'source/LampaWin-source.zip'
 Remove-Item -LiteralPath $firstPartySourceZip -Force -ErrorAction SilentlyContinue
 Compress-Archive -Path (Join-Path $sourceStageFull '*') -DestinationPath $firstPartySourceZip -CompressionLevel Optimal
 Remove-Item -LiteralPath $sourceStageFull -Recurse -Force
-Copy-Item -LiteralPath (Join-Path $root 'artifacts/source') -Destination (Join-Path $publish 'source') -Recurse -Force
-$zip = Join-Path $root 'artifacts/LampaWin-win-x64-portable.zip'
+Copy-Item -LiteralPath (Join-Path $artifactsRoot 'source') -Destination (Join-Path $publish 'source') -Recurse -Force
+$zip = Join-Path $artifactsRoot 'LampaWin-win-x64-portable.zip'
 Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
 Compress-Archive -Path (Join-Path $publish '*') -DestinationPath $zip -CompressionLevel Optimal
 if (!$SkipInstaller) {
@@ -149,14 +152,14 @@ if (!$SkipInstaller) {
     [xml]$project = Get-Content -Raw $desktop
     $appVersion = $project.Project.PropertyGroup.Version | Where-Object { $_ } | Select-Object -First 1
     if (!$appVersion -or $appVersion -notmatch '^\d+\.\d+\.\d+(\.\d+)?$') { throw "Invalid application version: $appVersion" }
-    & $iscc (Join-Path $root 'installer/LampaWin.iss') "/DPublishDir=$publish" "/DOutputDir=$(Join-Path $root 'artifacts')" "/DAppVersion=$appVersion"
+    & $iscc (Join-Path $root 'installer/LampaWin.iss') "/DPublishDir=$publish" "/DOutputDir=$artifactsRoot" "/DAppVersion=$appVersion"
     if ($LASTEXITCODE) { throw 'Inno Setup compile failed' }
 }
 $checksumFiles = @('LampaWin-win-x64-portable.zip')
 if (!$SkipInstaller) { $checksumFiles += 'LampaWin-Setup-win-x64.exe' }
 $checksumLines = foreach ($name in $checksumFiles) {
-    $hash = (Get-FileHash -LiteralPath (Join-Path $root "artifacts/$name") -Algorithm SHA256).Hash.ToLowerInvariant()
+    $hash = (Get-FileHash -LiteralPath (Join-Path $artifactsRoot $name) -Algorithm SHA256).Hash.ToLowerInvariant()
     "$hash *$name"
 }
-Set-Content -LiteralPath (Join-Path $root 'artifacts/SHA256SUMS.txt') -Value $checksumLines -Encoding ascii
+Set-Content -LiteralPath (Join-Path $artifactsRoot 'SHA256SUMS.txt') -Value $checksumLines -Encoding ascii
 Write-Host "Portable ZIP: $zip"

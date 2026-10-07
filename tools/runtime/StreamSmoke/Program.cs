@@ -8,7 +8,15 @@ using LampaWin.Core;
 using LampaWin.Core.Runtime;
 
 var root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../.."));
-var fixturePeerHost = IPAddress.Parse("192.168.1.17");
+var fixturePeerHost = NetworkInterface.GetAllNetworkInterfaces()
+    .Where(adapter => adapter.OperationalStatus == OperationalStatus.Up
+        && adapter.NetworkInterfaceType is NetworkInterfaceType.Ethernet or NetworkInterfaceType.Wireless80211
+        && adapter.GetIPProperties().GatewayAddresses.Any(gateway => gateway.Address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork))
+    .SelectMany(adapter => adapter.GetIPProperties().UnicastAddresses)
+    .Select(address => address.Address)
+    .FirstOrDefault(address => address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork
+        && !IPAddress.IsLoopback(address))
+    ?? throw new InvalidOperationException("A local IPv4 adapter is required for the isolated torrent fixture.");
 var fixtureProcess = new Process
 {
     StartInfo = new ProcessStartInfo("python", $"\"{Path.Combine(root, "tests", "libtorrent_fixture.py")}\" --peer-host {fixturePeerHost}")
@@ -23,8 +31,10 @@ var fixtureProcess = new Process
 fixtureProcess.StartInfo.Environment["PYTHONPATH"] = Path.Combine(root, ".tools", "test-python-site");
 fixtureProcess.Start();
 using var fixtureCancel = new CancellationTokenSource(TimeSpan.FromSeconds(40));
-var manifestLine = await fixtureProcess.StandardOutput.ReadLineAsync(fixtureCancel.Token)
-    ?? throw new InvalidOperationException("Local MSE fixture exited before publishing its manifest.");
+var manifestLine = await fixtureProcess.StandardOutput.ReadLineAsync(fixtureCancel.Token);
+if (manifestLine is null)
+    throw new InvalidOperationException("Local MSE fixture exited before publishing its manifest: "
+        + await fixtureProcess.StandardError.ReadToEndAsync(fixtureCancel.Token));
 using var fixtureManifest = JsonDocument.Parse(manifestLine);
 var fixtureTorrent = new Uri(fixtureManifest.RootElement.GetProperty("torrentUrl").GetString()!);
 var fixturePeerPort = fixtureManifest.RootElement.GetProperty("peerPort").GetInt32();
@@ -52,9 +62,42 @@ try
         using var settings = System.Text.Json.JsonDocument.Parse(await settingsResponse.Content.ReadAsStringAsync());
         if (!settings.RootElement.TryGetProperty("EnableBonjour", out var bonjour) || bonjour.ValueKind != System.Text.Json.JsonValueKind.False)
             throw new InvalidOperationException("Fresh local runtime must disable Bonjour LAN advertisement.");
+        if (settings.RootElement.GetProperty("ConnectionsLimit").GetInt32() != 100
+            || settings.RootElement.GetProperty("DownloadRateLimit").GetInt32() != 0
+            || settings.RootElement.GetProperty("PreloadCache").GetInt32() != 50)
+            throw new InvalidOperationException("Fresh local runtime does not have the expected desktop throughput settings.");
         Console.WriteLine("Fresh TorrServer profile has LAN Bonjour advertisement disabled.");
+        Console.WriteLine("TorrServer uses 100 peer connections, unlimited download rate and 50% preload cache.");
     }
     var link = Uri.EscapeDataString(fixtureTorrent.AbsoluteUri);
+    if (args.Contains("--player-ui"))
+    {
+        await using var gateway = new LocalGateway(new AppPaths(root, data), snapshot);
+        await gateway.StartAsync();
+        if (!gateway.TryCreateMediaUri(new Uri(gateway.Origin, $"torrserver/stream?link={link}&index=1&play").AbsoluteUri, out var media))
+            throw new InvalidOperationException("Could not create isolated torrent playback capability.");
+        var report = Path.Combine(root, "artifacts", "torrent-player-ui-smoke.json");
+        var start = new ProcessStartInfo(Path.Combine(root, ".tools", "dotnet", "dotnet.exe"))
+        {
+            WorkingDirectory = root, UseShellExecute = false, CreateNoWindow = true,
+            RedirectStandardOutput = true, RedirectStandardError = true
+        };
+        start.ArgumentList.Add(Path.Combine(root, "tools", "testing", "PlayerUiSmoke", "bin", "Debug", "net10.0-windows", "PlayerUiSmoke.dll"));
+        start.ArgumentList.Add(media.AbsoluteUri);
+        start.ArgumentList.Add(report);
+        using var ui = Process.Start(start) ?? throw new InvalidOperationException("Could not start torrent player UI smoke.");
+        var output = ui.StandardOutput.ReadToEndAsync();
+        var errors = ui.StandardError.ReadToEndAsync();
+        try { await ui.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(90)); }
+        finally { if (!ui.HasExited) { ui.Kill(entireProcessTree: true); await ui.WaitForExitAsync(); } }
+        await output;
+        await errors;
+        using var result = JsonDocument.Parse(await File.ReadAllTextAsync(report));
+        if (ui.ExitCode != 0 || !result.RootElement.GetProperty("success").GetBoolean())
+            throw new InvalidOperationException("Torrent player UI smoke failed; see artifacts/torrent-player-ui-smoke.json.");
+        Console.WriteLine("Torrent player UI smoke passed through the actual gateway, TorrServer and native VLC.");
+        return;
+    }
     foreach (var suffix in new[] { "&index=1&play" })
     {
         using var request = new HttpRequestMessage(HttpMethod.Get, new Uri(snapshot.TorrServerBaseUri, $"stream?link={link}{suffix}"));

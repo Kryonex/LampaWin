@@ -60,6 +60,11 @@ def main() -> int:
             port = int(session.listen_port())
             if port <= 0:
                 raise RuntimeError("libtorrent did not bind its local peer listener")
+            # Windows cannot announce to a loopback tracker from a socket bound to
+            # the physical adapter. Add a loopback listener using the same peer port;
+            # the fixture still advertises only its physical adapter to TorrServer.
+            if args.peer_host != "127.0.0.1":
+                session.apply_settings({"listen_interfaces": f"{args.peer_host}:{port},127.0.0.1:{port}"})
             # Seed-mode starts with all content present. Force a tracker announce and
             # wait until the local tracker has registered this MSE-capable peer.
             handle.force_reannounce()

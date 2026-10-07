@@ -8,6 +8,8 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
+using System.Windows.Media.Imaging;
+using System.Windows.Interop;
 using System.Runtime.InteropServices;
 using System.Windows.Threading;
 
@@ -23,6 +25,10 @@ public partial class MainWindow : Window
     private bool _documentLoaded;
     private bool _seeking;
     private bool _fullscreen;
+    private bool _topmost;
+    private Rect _restoreBounds;
+    private double _minimumWidth;
+    private double _minimumHeight;
     private string _audioTrackKey = "";
     private string _subtitleTrackKey = "";
     private WindowStyle _windowStyle;
@@ -30,13 +36,39 @@ public partial class MainWindow : Window
     private WindowState _windowState;
     private readonly DispatcherTimer _controlsTimer;
     private readonly DispatcherTimer _clickTimer;
+    private readonly DispatcherTimer _previewTimer;
     private bool _controlsVisible = true;
     private bool _keyboardNavigation;
     private bool _updatingPosition;
     private double _volumeBeforeMute = 80;
     private Point? _lastPointer;
+    private double? _pendingSeekSeconds;
+    private DateTimeOffset _pendingSeekStarted;
+    private double _previewFraction;
+    private CancellationTokenSource? _previewCancellation;
+    private readonly Dictionary<int, BitmapSource> _previewCache = [];
     [DllImport("user32.dll")]
     private static extern uint GetDoubleClickTime();
+    [DllImport("user32.dll")]
+    private static extern nint MonitorFromWindow(nint hwnd, uint flags);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool GetMonitorInfo(nint monitor, ref MonitorInfo info);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool SetWindowPos(nint hwnd, nint insertAfter, int x, int y, int width, int height, uint flags);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeRect { public int Left, Top, Right, Bottom; }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MonitorInfo
+    {
+        public uint Size;
+        public NativeRect Monitor;
+        public NativeRect Work;
+        public uint Flags;
+    }
+    private const uint MonitorDefaultToNearest = 2;
+    private const uint SwpFrameChanged = 0x0020;
+    private static readonly nint HwndTopmost = new(-1);
 
     public MainWindow()
     {
@@ -62,6 +94,12 @@ public partial class MainWindow : Window
         _controlsTimer.Tick += (_, _) => HidePlayerControls();
         _clickTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(GetDoubleClickTime()) };
         _clickTimer.Tick += (_, _) => { _clickTimer.Stop(); TogglePlayback(); };
+        _previewTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(260) };
+        _previewTimer.Tick += async (_, _) =>
+        {
+            _previewTimer.Stop();
+            await LoadSeekPreviewAsync(_previewFraction);
+        };
         Deactivated += (_, _) => { _clickTimer.Stop(); PlayerOverlay.Cursor = Cursors.Arrow; };
     }
 
@@ -171,6 +209,8 @@ public partial class MainWindow : Window
     {
         Dispatcher.Invoke(() =>
         {
+            _previewTimer.Stop();
+            _previewCancellation?.Cancel();
             UpdatePosition(0);
             TimeLabel.Text = "00:00 / 00:00";
             MediaTitle.Text = string.IsNullOrWhiteSpace(request.Title) ? "Воспроизведение" : request.Title;
@@ -182,6 +222,11 @@ public partial class MainWindow : Window
             PlayPauseButton.Content = "\uE769";
             PlayerSettingsPanel.Visibility = Visibility.Collapsed;
             _lastPointer = null;
+            _pendingSeekSeconds = null;
+            SeekBufferingPanel.Visibility = Visibility.Collapsed;
+            SeekPreview.Visibility = Visibility.Collapsed;
+            SeekPreviewImage.Source = null;
+            _previewCache.Clear();
 
             // В режиме плеера скрываем нижний статус-бар окна и убираем внешние отступы, чтобы видео занимало всё окно
             WindowFooter.Visibility = Visibility.Collapsed;
@@ -209,9 +254,34 @@ public partial class MainWindow : Window
         PlaybackChanged?.Invoke(update);
         if (update.State is PlaybackState.Playing) RefreshTracksIfChanged();
         var duration = update.DurationSeconds;
+        var displayedPosition = update.PositionSeconds;
+        if (_pendingSeekSeconds is { } target)
+        {
+            const double tolerance = 2;
+            var terminal = update.State is PlaybackState.Error or PlaybackState.Ended or PlaybackState.Stopped;
+            if (terminal || (!update.IsBuffering && update.State is PlaybackState.Playing or PlaybackState.Paused
+                && Math.Abs(update.PositionSeconds - target) <= tolerance))
+            {
+                _pendingSeekSeconds = null;
+                SeekBufferingPanel.Visibility = Visibility.Collapsed;
+            }
+            else
+            {
+                displayedPosition = target;
+                SeekBufferingText.Text = DateTimeOffset.UtcNow - _pendingSeekStarted > TimeSpan.FromSeconds(20)
+                    ? "Участок ещё загружается…" : "Подгружаем…";
+                SeekBufferingPanel.Visibility = Visibility.Visible;
+            }
+        }
+        if (_pendingSeekSeconds is null)
+        {
+            SeekBufferingPanel.Visibility = update.IsBuffering && update.State is not (PlaybackState.Stopped or PlaybackState.Ended or PlaybackState.Error)
+                ? Visibility.Visible : Visibility.Collapsed;
+            SeekBufferingText.Text = "Подгружаем…";
+        }
         if (!_seeking && duration > 0)
-            UpdatePosition(Math.Clamp(update.PositionSeconds / duration, 0, 1) * PositionSlider.Maximum);
-        TimeLabel.Text = $"{FormatTime(update.PositionSeconds)} / {FormatTime(duration)}";
+            UpdatePosition(Math.Clamp(displayedPosition / duration, 0, 1) * PositionSlider.Maximum);
+        if (!_seeking) TimeLabel.Text = $"{FormatTime(displayedPosition)} / {FormatTime(duration)}";
         PositionSlider.IsEnabled = duration > 0 && _player.MediaPlayer.IsSeekable;
         if (update.State is PlaybackState.Playing)
         {
@@ -290,7 +360,7 @@ public partial class MainWindow : Window
     private void CommitSeek()
     {
         if (!_seeking) return;
-        _player.SeekTo(PositionSlider.Value / PositionSlider.Maximum);
+        SeekToFraction(PositionSlider.Value / PositionSlider.Maximum);
         _seeking = false;
         ShowPlayerControls();
     }
@@ -299,18 +369,97 @@ public partial class MainWindow : Window
         if (_seeking && _player.MediaPlayer.Length > 0)
             TimeLabel.Text = $"{FormatTime(_player.MediaPlayer.Length * PositionSlider.Value / PositionSlider.Maximum / 1000d)} / {FormatTime(_player.MediaPlayer.Length / 1000d)}";
         else if (!_updatingPosition && PositionSlider.IsKeyboardFocusWithin && _player.MediaPlayer.Length > 0)
-            _player.SeekTo(PositionSlider.Value / PositionSlider.Maximum);
+            SeekToFraction(PositionSlider.Value / PositionSlider.Maximum);
     }
     private void PositionSlider_MouseMove(object sender, MouseEventArgs e)
     {
         var duration = _player.MediaPlayer.Length / 1000d;
         if (duration <= 0 || PositionSlider.ActualWidth <= 0) return;
         var x = Math.Clamp(e.GetPosition(PositionSlider).X, 0, PositionSlider.ActualWidth);
-        SeekPreviewText.Text = FormatTime(duration * x / PositionSlider.ActualWidth);
-        SeekPreview.Margin = new Thickness(Math.Clamp(x + 4, 24, Math.Max(24, PlayerOverlay.ActualWidth - 88)), 0, 0, 92);
+        _previewFraction = x / PositionSlider.ActualWidth;
+        SeekPreviewText.Text = FormatTime(duration * _previewFraction);
+        SeekPreview.Margin = new Thickness(Math.Clamp(x - 88, 24, Math.Max(24, PlayerOverlay.ActualWidth - 200)), 0, 0, 92);
         SeekPreview.Visibility = Visibility.Visible;
+        var bucket = PreviewBucket(duration, _previewFraction);
+        if (_previewCache.TryGetValue(bucket, out var cached))
+        {
+            SeekPreviewImage.Source = cached;
+            SeekPreviewLoading.Visibility = Visibility.Collapsed;
+        }
+        else
+        {
+            SeekPreviewImage.Source = null;
+            SeekPreviewLoading.Text = "Загрузка кадра…";
+            SeekPreviewLoading.Visibility = Visibility.Visible;
+            _previewTimer.Stop();
+            _previewTimer.Start();
+        }
     }
-    private void PositionSlider_MouseLeave(object sender, MouseEventArgs e) => SeekPreview.Visibility = Visibility.Collapsed;
+    private void PositionSlider_MouseLeave(object sender, MouseEventArgs e)
+    {
+        _previewTimer.Stop();
+        _previewCancellation?.Cancel();
+        SeekPreview.Visibility = Visibility.Collapsed;
+    }
+
+    private static int PreviewBucket(double duration, double fraction) =>
+        (int)Math.Round(duration * Math.Clamp(fraction, 0, 1) / 2d, MidpointRounding.AwayFromZero);
+
+    private async Task LoadSeekPreviewAsync(double fraction)
+    {
+        var duration = _player.MediaPlayer.Length / 1000d;
+        if (duration <= 0 || SeekPreview.Visibility != Visibility.Visible) return;
+        var bucket = PreviewBucket(duration, fraction);
+        if (_previewCache.TryGetValue(bucket, out var cached))
+        {
+            SeekPreviewImage.Source = cached;
+            SeekPreviewLoading.Visibility = Visibility.Collapsed;
+            return;
+        }
+        _previewCancellation?.Cancel();
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+        _previewCancellation = cancellation;
+        try
+        {
+            var bytes = await _player.CapturePreviewAsync(Math.Clamp(bucket * 2d / duration, 0, 1), cancellation.Token);
+            cancellation.Token.ThrowIfCancellationRequested();
+            if (bytes is null || bytes.Length == 0)
+            {
+                SeekPreviewLoading.Text = "Кадр пока недоступен";
+                return;
+            }
+            using var stream = new MemoryStream(bytes, writable: false);
+            var image = new BitmapImage();
+            image.BeginInit();
+            image.CacheOption = BitmapCacheOption.OnLoad;
+            image.StreamSource = stream;
+            image.EndInit();
+            image.Freeze();
+            if (_previewCache.Count >= 24) _previewCache.Remove(_previewCache.Keys.First());
+            _previewCache[bucket] = image;
+            if (SeekPreview.Visibility == Visibility.Visible && PreviewBucket(duration, _previewFraction) == bucket)
+            {
+                SeekPreviewImage.Source = image;
+                SeekPreviewLoading.Visibility = Visibility.Collapsed;
+            }
+        }
+        catch (OperationCanceledException) { }
+        finally { if (ReferenceEquals(_previewCancellation, cancellation)) _previewCancellation = null; }
+    }
+
+    private void SeekToFraction(double fraction)
+    {
+        var duration = _player.MediaPlayer.Length / 1000d;
+        if (duration <= 0) return;
+        fraction = Math.Clamp(fraction, 0, 1);
+        _pendingSeekSeconds = duration * fraction;
+        _pendingSeekStarted = DateTimeOffset.UtcNow;
+        UpdatePosition(fraction * PositionSlider.Maximum);
+        TimeLabel.Text = $"{FormatTime(_pendingSeekSeconds.Value)} / {FormatTime(duration)}";
+        SeekBufferingPanel.Visibility = Visibility.Visible;
+        SeekBufferingText.Text = "Подгружаем…";
+        _player.SeekTo(fraction);
+    }
     private void VolumeSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
         _player.SetVolume(e.NewValue);
@@ -338,7 +487,10 @@ public partial class MainWindow : Window
     private void Forward_Click(object sender, RoutedEventArgs e) => SeekPlayback(10);
     private void SeekPlayback(int seconds)
     {
-        _player.SeekBy(TimeSpan.FromSeconds(seconds));
+        var duration = _player.MediaPlayer.Length / 1000d;
+        if (duration <= 0) return;
+        var current = _pendingSeekSeconds ?? Math.Max(0, _player.MediaPlayer.Time / 1000d);
+        SeekToFraction(Math.Clamp(current + seconds, 0, duration) / duration);
         ShowPlayerControls();
     }
     private void PlayerSettings_Click(object sender, RoutedEventArgs e)
@@ -467,6 +619,10 @@ public partial class MainWindow : Window
         _controlsTimer.Stop();
         _clickTimer.Stop();
         _seeking = false;
+        _pendingSeekSeconds = null;
+        SeekBufferingPanel.Visibility = Visibility.Collapsed;
+        _previewTimer.Stop();
+        _previewCancellation?.Cancel();
         _keyboardNavigation = false;
         PlayerOverlay.Cursor = Cursors.Arrow;
         PlayerSettingsPanel.Visibility = Visibility.Collapsed;
@@ -515,15 +671,42 @@ public partial class MainWindow : Window
     {
         if (!_fullscreen)
         {
+            var handle = new WindowInteropHelper(this).Handle;
+            var monitor = MonitorFromWindow(handle, MonitorDefaultToNearest);
+            var info = new MonitorInfo { Size = (uint)Marshal.SizeOf<MonitorInfo>() };
+            if (monitor == nint.Zero || !GetMonitorInfo(monitor, ref info))
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Не удалось определить границы монитора для полноэкранного режима.");
             _windowStyle = WindowStyle; _resizeMode = ResizeMode; _windowState = WindowState;
-            WindowStyle = WindowStyle.None; ResizeMode = ResizeMode.NoResize; WindowState = WindowState.Maximized;
+            _topmost = Topmost;
+            _restoreBounds = WindowState == WindowState.Normal ? new Rect(Left, Top, Width, Height) : RestoreBounds;
+            _minimumWidth = MinWidth;
+            _minimumHeight = MinHeight;
+            MinWidth = 0;
+            MinHeight = 0;
+            WindowState = WindowState.Normal;
+            WindowStyle = WindowStyle.None;
+            ResizeMode = ResizeMode.NoResize;
+            Topmost = true;
+            if (!SetWindowPos(handle, HwndTopmost, info.Monitor.Left, info.Monitor.Top,
+                info.Monitor.Right - info.Monitor.Left, info.Monitor.Bottom - info.Monitor.Top, SwpFrameChanged))
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Не удалось развернуть окно на весь монитор.");
             _fullscreen = true;
             FullscreenButton.Content = "\uE73F";
             FullscreenButton.ToolTip = "Выйти из полного экрана (Esc / F)";
         }
         else
         {
-            WindowState = _windowState; ResizeMode = _resizeMode; WindowStyle = _windowStyle;
+            Topmost = _topmost;
+            WindowState = WindowState.Normal;
+            ResizeMode = _resizeMode;
+            WindowStyle = _windowStyle;
+            MinWidth = _minimumWidth;
+            MinHeight = _minimumHeight;
+            Left = _restoreBounds.Left;
+            Top = _restoreBounds.Top;
+            Width = _restoreBounds.Width;
+            Height = _restoreBounds.Height;
+            WindowState = _windowState;
             _fullscreen = false;
             FullscreenButton.Content = "\uE740";
             FullscreenButton.ToolTip = "На весь экран (F / F11)";
@@ -559,6 +742,8 @@ public partial class MainWindow : Window
     {
         _controlsTimer.Stop();
         _clickTimer.Stop();
+        _previewTimer.Stop();
+        _previewCancellation?.Cancel();
         ExitRequested?.Invoke();
         VideoSurface.MediaPlayer = null;
         VideoSurface.Dispose();

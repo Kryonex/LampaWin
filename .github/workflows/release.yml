@@ -69,9 +69,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
+          $notesFile = "releases/${{ steps.version.outputs.app_version }}.md"
+          $notesArguments = if (Test-Path -LiteralPath $notesFile) { @('--notes-file', $notesFile) } else { @('--generate-notes') }
           gh release create "v${{ steps.version.outputs.app_version }}" `
             artifacts/LampaWin-Setup-win-x64.exe `
             artifacts/LampaWin-win-x64-portable.zip `
             artifacts/SHA256SUMS.txt `
             --title "LampaWin v${{ steps.version.outputs.app_version }}" `
-            --generate-notes
+            @notesArguments

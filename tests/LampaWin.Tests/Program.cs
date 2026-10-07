@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using LampaWin.Core;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -17,6 +18,29 @@ void Assert(bool value, string name)
     if (!value) throw new InvalidOperationException("FAILED: " + name);
     passed.Add(name); Console.WriteLine("PASS " + name);
 }
+var titlePolicyCases = JsonNode.Parse("""
+    [
+      {"Title":"Blue Planet 2017 1080p","Seeders":20,"Category":[5000]},
+      {"Title":"Blue Valentine 2010","Seeders":400,"Category":[2000]},
+      {"Title":"Blue Planet 2001","Seeders":200,"Category":[5000]},
+      {"Title":"Blue Planet Steam-Rip","Seeders":900,"Category":[8000]}
+    ]
+    """)!.AsArray();
+TorrentResultPolicy.FilterAndRank(titlePolicyCases, "Blue Planet 2017");
+Assert(titlePolicyCases.Count == 1 && titlePolicyCases[0]!["Title"]!.ToString() == "Blue Planet 2017 1080p",
+    "torrent relevance requires a matching multiword title and rejects conflicting release years and normalized game markers");
+var numericCases = JsonNode.Parse("""[{"Title":"1917 (2019)","Seeders":5},{"Title":"Other movie (2019)","Seeders":50}]""")!.AsArray();
+TorrentResultPolicy.FilterAndRank(numericCases, "1917");
+Assert(numericCases.Count == 1 && numericCases[0]!["Title"]!.ToString().StartsWith("1917"),
+    "numeric movie title remains a required identity token");
+var seasonCases = JsonNode.Parse("""[{"Title":"Blue Planet S01","Seeders":80},{"Title":"Blue Planet Сезоны 1-3","Seeders":10},{"Title":"Blue Planet S02","Seeders":5}]""")!.AsArray();
+TorrentResultPolicy.FilterAndRank(seasonCases, "Blue Planet S02");
+Assert(seasonCases.Count == 2 && !seasonCases.Any(item => item!["Title"]!.ToString() == "Blue Planet S01"),
+    "explicit season search rejects other seasons and keeps inclusive season packs");
+var episodeCases = JsonNode.Parse("""[{"Title":"Blue Planet S02E01","Seeders":80},{"Title":"Blue Planet S02 Серии 1-10","Seeders":10},{"Title":"Blue Planet S02E03","Seeders":5}]""")!.AsArray();
+TorrentResultPolicy.FilterAndRank(episodeCases, "Blue Planet S02E03");
+Assert(episodeCases.Count == 2 && !episodeCases.Any(item => item!["Title"]!.ToString() == "Blue Planet S02E01"),
+    "explicit episode search rejects other episodes and keeps inclusive episode packs");
 var temporary = Path.Combine(Path.GetTempPath(), "LampaWin-tests-" + Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(Path.Combine(temporary, "components", "lampa"));
 var paths = new AppPaths(temporary, Path.Combine(temporary, "data"));
@@ -53,7 +77,13 @@ backend.MapGet("/api/v2.0/indexers/all/results", async context =>
 {
     sawInjectedKey = context.Request.Query["apikey"] == apiKey && context.Request.Query["Query"] == "fixture";
     context.Response.ContentType = "application/json";
-    await context.Response.WriteAsync(JsonSerializer.Serialize(new { Results = new[] { new { Title = "fixture", Link = backendBase + "dl/fixture/?apikey=" + apiKey, MagnetUri = "magnet:?xt=urn:btih:0123456789012345678901234567890123456789" } } }));
+    await context.Response.WriteAsync(JsonSerializer.Serialize(new { Results = new object[]
+    {
+        new { Title = "fixture weak", Seeders = 0, Peers = 40, Category = new[] { 2000 }, Link = backendBase + "dl/fixture/?apikey=" + apiKey, MagnetUri = "magnet:?xt=urn:btih:0123456789012345678901234567890123456789" },
+        new { Title = "fixture PC RePack by FitGirl", Seeders = 900, Peers = 20, Category = new[] { 4000 }, Link = backendBase + "dl/fixture/?apikey=" + apiKey, MagnetUri = "magnet:?xt=urn:btih:1123456789012345678901234567890123456789" },
+        new { Title = "unrelated popular movie", Seeders = 500, Peers = 10, Category = new[] { 2000 }, Link = backendBase + "dl/fixture/?apikey=" + apiKey, MagnetUri = "magnet:?xt=urn:btih:2123456789012345678901234567890123456789" },
+        new { Title = "fixture healthy", Seeders = 25, Peers = 3, Category = new[] { 2000 }, Link = backendBase + "dl/fixture/?apikey=" + apiKey, MagnetUri = "magnet:?xt=urn:btih:3123456789012345678901234567890123456789" }
+    } }));
 });
 const string torrentFixture = "d4:infod4:name7:fixtureee";
 backend.MapGet("/dl/fixture/", () => Results.Bytes(Encoding.UTF8.GetBytes(torrentFixture), "application/x-bittorrent"));
@@ -84,6 +114,9 @@ try
     Assert(sawInjectedKey, "Jackett key cannot be overridden by browser");
     Assert(!search.Contains(apiKey) && search.Contains("/download/"), "download URLs rewritten without API keys");
     using var results = JsonDocument.Parse(search);
+    Assert(results.RootElement.GetProperty("Results").GetArrayLength() == 1
+        && results.RootElement.GetProperty("Results")[0].GetProperty("Title").GetString() == "fixture healthy",
+        "torrent results reject games, unrelated titles and zero-seed choices when a healthy swarm exists");
     var link = results.RootElement.GetProperty("Results")[0].GetProperty("Link").GetString();
     Assert(await anonymous.GetStringAsync(link) == torrentFixture, "TorrServer can download torrent without browser cookies");
     Assert((await anonymous.GetAsync(new Uri(gateway.Origin, "download/fake"))).StatusCode == HttpStatusCode.Forbidden, "fake download capability rejected");

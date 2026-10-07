@@ -87,15 +87,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/packaging/Build-Releas
 
 ### Публикация обновления
 
-Чтобы выпустить новую версию, измени `Version`, `FileVersion` и `InformationalVersion` в `src/LampaWin.Desktop/LampaWin.Desktop.csproj` и отправь изменения в ветку `main`. Например, для версии `1.0.4`:
+Чтобы выпустить новую версию, измени `Version`, `FileVersion` и `InformationalVersion` в `src/LampaWin.Desktop/LampaWin.Desktop.csproj` и отправь изменения в ветку `main`. Например, для версии `1.0.5`:
 
 ```powershell
 git add src/LampaWin.Desktop/LampaWin.Desktop.csproj
-git commit -m "Release LampaWin 1.0.4"
+git commit -m "Release LampaWin 1.0.5"
 git push origin main
 ```
 
-Если для этой версии ещё нет релиза, GitHub Actions автоматически соберёт установщик и портативный архив и создаст `v1.0.4` GitHub Release с SHA-256. Установленная LampaWin при следующем запуске предложит обновление; после согласия загрузит установщик, проверит контрольную сумму, установит новую версию и перезапустится. Профиль и настройки в `%LOCALAPPDATA%\LampaWin` сохраняются. Портативную копию нужно обновить вручную.
+Если для этой версии ещё нет релиза, GitHub Actions автоматически соберёт установщик и портативный архив и создаст `v1.0.5` GitHub Release с SHA-256. Описание изменений берётся из `releases/1.0.5.md`, если такой файл существует. Установленная LampaWin при следующем запуске предложит обновление; после согласия загрузит установщик, проверит контрольную сумму, установит новую версию и перезапустится. Профиль и настройки в `%LOCALAPPDATA%\LampaWin` сохраняются. Портативную копию нужно обновить вручную.
 
 ## Лицензии
 

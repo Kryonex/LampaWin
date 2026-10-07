@@ -267,42 +267,14 @@ public sealed class LocalGateway : IAsyncDisposable
                 var json = JsonNode.Parse(body);
                 if (json?["Results"] is JsonArray items)
                 {
+                    var searchQuery = context.Request.Query["Query"].FirstOrDefault()
+                        ?? context.Request.Query["query"].FirstOrDefault()
+                        ?? context.Request.Query["q"].FirstOrDefault();
+                    TorrentResultPolicy.FilterAndRank(items, searchQuery);
                     for (var i = items.Count - 1; i >= 0; i--)
                     {
                         var item = items[i];
                         if (item is null) continue;
-
-                        // Filter out PC/Console video games (e.g. from general categories or indexers without subcategory breakdown like RuTor)
-                        var title = item["Title"]?.GetValue<string>() ?? "";
-                        var desc = item["Description"]?.GetValue<string>() ?? "";
-                        var details = item["Details"]?.GetValue<string>() ?? "";
-                        var combined = $"{title} {desc} {details}";
-
-                        var isGame = false;
-                        if (combined.Contains(" PC |", StringComparison.OrdinalIgnoreCase) ||
-                            combined.Contains(" PC]", StringComparison.OrdinalIgnoreCase) ||
-                            combined.Contains(" RePack", StringComparison.OrdinalIgnoreCase) ||
-                            combined.Contains(" GOG]", StringComparison.OrdinalIgnoreCase) ||
-                            combined.Contains(" GOG |", StringComparison.OrdinalIgnoreCase) ||
-                            combined.Contains(" Early Access", StringComparison.OrdinalIgnoreCase) ||
-                            combined.Contains(" Steam-Rip", StringComparison.OrdinalIgnoreCase) ||
-                            combined.Contains(" FitGirl", StringComparison.OrdinalIgnoreCase) ||
-                            combined.Contains(" Igruha", StringComparison.OrdinalIgnoreCase) ||
-                            combined.Contains(" Xatab", StringComparison.OrdinalIgnoreCase) ||
-                            combined.Contains(" Игры на ПК", StringComparison.OrdinalIgnoreCase) ||
-                            combined.Contains(" Nintendo Switch", StringComparison.OrdinalIgnoreCase) ||
-                            combined.Contains(" PS4", StringComparison.OrdinalIgnoreCase) ||
-                            combined.Contains(" PS5", StringComparison.OrdinalIgnoreCase))
-                        {
-                            isGame = true;
-                        }
-
-                        if (isGame)
-                        {
-                            items.RemoveAt(i);
-                            continue;
-                        }
-
                         var link = item["Link"]?.GetValue<string>();
                         if (Uri.TryCreate(link, UriKind.Absolute, out var download) &&
                             download.GetLeftPart(UriPartial.Authority) == current.JackettBaseUri.GetLeftPart(UriPartial.Authority))

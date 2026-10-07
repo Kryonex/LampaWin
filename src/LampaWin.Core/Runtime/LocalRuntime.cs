@@ -394,7 +394,7 @@ public sealed class LocalRuntime : ILocalRuntime
 
     private async Task ApplyTorrDefaultsOnceAsync(Uri baseUri, string user, string password, CancellationToken token)
     {
-        var marker = Path.Combine(_paths.TorrServerData, "lampawin-settings-v1.json");
+        var marker = Path.Combine(_paths.TorrServerData, "lampawin-settings-v2.json");
         if (File.Exists(marker)) return;
         var auth = new AuthenticationHeaderValue("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes($"{user}:{password}")));
         using var get = new HttpRequestMessage(HttpMethod.Post, new Uri(baseUri, "settings"))
@@ -407,11 +407,18 @@ public sealed class LocalRuntime : ILocalRuntime
         using var current = JsonDocument.Parse(await response.Content.ReadAsStringAsync(token).ConfigureAwait(false));
         var settings = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(current.RootElement.GetRawText()) ?? new();
         using var cacheValue = JsonDocument.Parse("268435456");
-        using var preloadValue = JsonDocument.Parse("35");
+        using var preloadValue = JsonDocument.Parse("50");
+        using var connectionsValue = JsonDocument.Parse("100");
+        using var unlimitedValue = JsonDocument.Parse("0");
         using var diskValue = JsonDocument.Parse("false");
         using var pathValue = JsonDocument.Parse("\"\"");
         settings["CacheSize"] = cacheValue.RootElement.Clone();
         settings["PreloadCache"] = preloadValue.RootElement.Clone();
+        // TorrServer defaults to 25 peers, which is unnecessarily restrictive on a desktop
+        // connection. Keep rate limiting disabled and allow a broader peer set while retaining
+        // the upstream TCP/uTP/DHT/PEX/UPnP defaults.
+        settings["ConnectionsLimit"] = connectionsValue.RootElement.Clone();
+        settings["DownloadRateLimit"] = unlimitedValue.RootElement.Clone();
         settings["UseDisk"] = diskValue.RootElement.Clone();
         settings["TorrentsSavePath"] = pathValue.RootElement.Clone();
         // This runtime is intentionally loopback-only; it does not need to advertise its control API on the LAN.
@@ -421,7 +428,7 @@ public sealed class LocalRuntime : ILocalRuntime
         set.Headers.Authorization = auth;
         using var setResponse = await _setupHttp.SendAsync(set, token).ConfigureAwait(false);
         setResponse.EnsureSuccessStatusCode();
-        await File.WriteAllTextAsync(marker, "{\"version\":1}", token).ConfigureAwait(false);
+        await File.WriteAllTextAsync(marker, "{\"version\":2}", token).ConfigureAwait(false);
     }
 
     private async Task<bool> AreHealthyAsync(RuntimeSnapshot snapshot, CancellationToken token)

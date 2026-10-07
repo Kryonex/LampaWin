@@ -1,6 +1,11 @@
 using LibVLCSharp.Shared;
 using LibVLCSharp.Shared.Structures;
 using System.Collections.Concurrent;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
+using MediaPlayer = LibVLCSharp.Shared.MediaPlayer;
 using System.Windows.Threading;
 
 namespace LampaWin.Desktop;
@@ -13,11 +18,14 @@ public sealed class PlayerController : IDisposable
     private readonly LibVLC _libVlc;
     private readonly MediaPlayer _player;
     private Media? _media;
+    private Uri? _currentUrl;
     private string? _sessionId;
     private bool _disposed;
     private PlaybackState _state = PlaybackState.Stopped;
+    private volatile bool _buffering;
     private long? _pendingStartMilliseconds;
     private readonly ConcurrentDictionary<string, byte> _reportedLogCategories = new(StringComparer.Ordinal);
+    private readonly SemaphoreSlim _previewGate = new(1, 1);
 
     public PlayerController(Dispatcher dispatcher)
     {
@@ -31,6 +39,7 @@ public sealed class PlayerController : IDisposable
         _player.Stopped += (_, _) => { _state = PlaybackState.Stopped; ReportDiagnostic("native-stopped", "Info"); Emit(_state); };
         _player.EndReached += (_, _) => { ReportDiagnostic("native-ended", "Info"); _dispatcher.BeginInvoke(FinishNaturally); };
         _player.EncounteredError += (_, _) => { _state = PlaybackState.Error; ReportDiagnostic("native-encountered-error", "Error"); Emit(_state); };
+        _player.Buffering += (_, progress) => { _buffering = progress.Cache < 100; Emit(_state); };
         _timer = new DispatcherTimer(TimeSpan.FromMilliseconds(500), DispatcherPriority.Background, (_, _) =>
         {
             // Some streams reach VLCState.Ended without raising EndReached.
@@ -71,7 +80,9 @@ public sealed class PlayerController : IDisposable
             throw new ArgumentException("Поддерживаются только HTTP, HTTPS и локальные файлы.", nameof(request));
         Stop();
         _sessionId = request.SessionId;
+        _currentUrl = request.Url;
         _state = PlaybackState.Opening;
+        _buffering = true;
         ReportDiagnostic("open-requested", "Info");
         _pendingStartMilliseconds = request.StartSeconds > 0 && double.IsFinite(request.StartSeconds)
             ? (long)(Math.Clamp(request.StartSeconds, 0, int.MaxValue / 1000d) * 1000)
@@ -105,6 +116,72 @@ public sealed class PlayerController : IDisposable
         _player.Time = (long)(_player.Length * Math.Clamp(fraction, 0, 1));
     }
 
+    /// <summary>Captures a throttled, off-screen frame without moving the active player.</summary>
+    public async Task<byte[]?> CapturePreviewAsync(double fraction, CancellationToken cancellationToken)
+    {
+        var source = _currentUrl;
+        if (_disposed || source is null || !double.IsFinite(fraction)) return null;
+        await _previewGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        const int width = 320, height = 180, stride = width * 4;
+        var pixels = Marshal.AllocHGlobal(stride * height);
+        try
+        {
+            // A private decoder keeps preview cancellation/disposal independent of playback.
+            using var decoder = new LibVLC("--no-audio", "--avcodec-hw=none");
+            using var media = new Media(decoder, source);
+            media.AddOption(":no-audio");
+            media.AddOption(":no-video-title-show");
+            var target = Math.Max(0, _player.Length * Math.Clamp(fraction, 0, .999));
+            media.AddOption(":start-time=" + (target / 1000d).ToString(System.Globalization.CultureInfo.InvariantCulture));
+            using var preview = new MediaPlayer(decoder) { Mute = true };
+            var frame = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var bufferLock = new object();
+            MediaPlayer.LibVLCVideoLockCb lockFrame = (_, planes) =>
+            {
+                Monitor.Enter(bufferLock);
+                Marshal.WriteIntPtr(planes, pixels);
+                return nint.Zero;
+            };
+            MediaPlayer.LibVLCVideoUnlockCb unlockFrame = (_, _, _) => Monitor.Exit(bufferLock);
+            MediaPlayer.LibVLCVideoDisplayCb displayFrame = (_, _) =>
+            {
+                if (frame.Task.IsCompleted || Math.Abs(preview.Time - target) > 1500) return;
+                var copy = new byte[stride * height];
+                lock (bufferLock) Marshal.Copy(pixels, copy, 0, copy.Length);
+                frame.TrySetResult(copy);
+            };
+            preview.SetVideoFormat("RV32", width, height, stride);
+            preview.SetVideoCallbacks(lockFrame, unlockFrame, displayFrame);
+            preview.EncounteredError += (_, _) => frame.TrySetException(new InvalidOperationException("Preview source could not be opened."));
+            if (!preview.Play(media)) return null;
+            try
+            {
+                var bytes = await frame.Task.WaitAsync(TimeSpan.FromSeconds(6), cancellationToken).ConfigureAwait(false);
+                var bitmap = BitmapSource.Create(width, height, 96, 96, PixelFormats.Bgr32, null, bytes, stride);
+                bitmap.Freeze();
+                var encoder = new PngBitmapEncoder();
+                encoder.Frames.Add(BitmapFrame.Create(bitmap));
+                using var output = new MemoryStream();
+                encoder.Save(output);
+                return output.ToArray();
+            }
+            finally
+            {
+                preview.Stop();
+                GC.KeepAlive(lockFrame);
+                GC.KeepAlive(unlockFrame);
+                GC.KeepAlive(displayFrame);
+            }
+        }
+        catch (TimeoutException) { return null; }
+        catch (InvalidOperationException) { return null; }
+        finally
+        {
+            Marshal.FreeHGlobal(pixels);
+            _previewGate.Release();
+        }
+    }
+
     public void SetVolume(double value) => _player.Volume = (int)Math.Clamp(double.IsFinite(value) ? value : 0, 0, 100);
     public void SetAudioTrack(int id) => _player.SetAudioTrack(id);
     public void SetSubtitleTrack(int id) => _player.SetSpu(id);
@@ -117,7 +194,9 @@ public sealed class PlayerController : IDisposable
         if (session is not null) EmitNow(PlaybackState.Stopped);
         _sessionId = null;
         _state = PlaybackState.Stopped;
+        _buffering = false;
         _pendingStartMilliseconds = null;
+        _currentUrl = null;
         if (_player.Media is not null) _player.Stop();
         _media?.Dispose();
         _media = null;
@@ -128,7 +207,7 @@ public sealed class PlayerController : IDisposable
     {
         var session = _sessionId;
         if (session is null) return;
-        var current = new PlaybackProgress(session, Math.Max(0, _player.Time / 1000d), Math.Max(0, _player.Length / 1000d), state);
+        var current = new PlaybackProgress(session, Math.Max(0, _player.Time / 1000d), Math.Max(0, _player.Length / 1000d), state, _buffering);
         if (!_dispatcher.HasShutdownStarted) _dispatcher.BeginInvoke(() =>
         {
             if (!_disposed && _sessionId == current.SessionId) ProgressChanged?.Invoke(current);
@@ -149,6 +228,7 @@ public sealed class PlayerController : IDisposable
         EmitNow(_state);
         _sessionId = null;
         _pendingStartMilliseconds = null;
+        _currentUrl = null;
         _media?.Dispose();
         _media = null;
         PlaybackEnded?.Invoke(session);
@@ -199,6 +279,7 @@ public sealed class PlayerController : IDisposable
         _libVlc.Log -= OnLibVlcLog;
         _player.Dispose();
         _libVlc.Dispose();
+        // An in-flight preview owns this gate until its cancellation unwinds.
         GC.SuppressFinalize(this);
     }
 }

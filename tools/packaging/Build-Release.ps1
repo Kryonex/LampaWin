@@ -2,7 +2,8 @@
 param([switch]$SkipInstaller,[switch]$SkipJackettPublish)
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
-$dotnet = Join-Path $root '.tools/dotnet/dotnet.exe'
+$localDotnet = Join-Path $root '.tools/dotnet/dotnet.exe'
+$dotnet = if (Test-Path $localDotnet) { $localDotnet } else { (Get-Command dotnet -ErrorAction Stop).Source }
 $desktop = Join-Path $root 'src/LampaWin.Desktop/LampaWin.Desktop.csproj'
 $jackettSource = Join-Path $root '.cache/jackett-source/src/Jackett.Server/Jackett.Server.csproj'
 $publish = Join-Path $root 'artifacts/publish'
@@ -141,7 +142,17 @@ if (!$SkipInstaller) {
         if ($installer.ExitCode -ne 0) { throw "Inno Setup local install failed with exit code $($installer.ExitCode)" }
     }
     if (!(Test-Path $iscc)) { throw "ISCC.exe not found under .tools/inno after setup: $iscc" }
-    & $iscc (Join-Path $root 'installer/LampaWin.iss') "/DPublishDir=$publish" "/DOutputDir=$(Join-Path $root 'artifacts')"
+    [xml]$project = Get-Content -Raw $desktop
+    $appVersion = $project.Project.PropertyGroup.Version | Where-Object { $_ } | Select-Object -First 1
+    if (!$appVersion -or $appVersion -notmatch '^\d+\.\d+\.\d+(\.\d+)?$') { throw "Invalid application version: $appVersion" }
+    & $iscc (Join-Path $root 'installer/LampaWin.iss') "/DPublishDir=$publish" "/DOutputDir=$(Join-Path $root 'artifacts')" "/DAppVersion=$appVersion"
     if ($LASTEXITCODE) { throw 'Inno Setup compile failed' }
 }
+$checksumFiles = @('LampaWin-win-x64-portable.zip')
+if (!$SkipInstaller) { $checksumFiles += 'LampaWin-Setup-win-x64.exe' }
+$checksumLines = foreach ($name in $checksumFiles) {
+    $hash = (Get-FileHash -LiteralPath (Join-Path $root "artifacts/$name") -Algorithm SHA256).Hash.ToLowerInvariant()
+    "$hash *$name"
+}
+Set-Content -LiteralPath (Join-Path $root 'artifacts/SHA256SUMS.txt') -Value $checksumLines -Encoding ascii
 Write-Host "Portable ZIP: $zip"

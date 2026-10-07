@@ -45,6 +45,11 @@ public static class DesktopBootstrap
         }
         _session = new Session(paths, window);
         window.Show();
+        if (!smoke && await DesktopUpdater.CheckAndOfferAsync())
+        {
+            window.Close();
+            return;
+        }
         if (smoke)
         {
             var report = ArgumentValue(arguments, "--report") ?? Path.Combine(paths.DataRoot, "self-test.json");

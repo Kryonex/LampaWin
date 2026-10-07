@@ -56,6 +56,7 @@ internal sealed class SmokeApp(string[] args) : Application
             _window.Play(new MediaRequest(new Uri(Path.GetFullPath(args[0])), "Тестовый фильм · Встроенный VLC", 0, Guid.NewGuid().ToString()));
             await played.Task.WaitAsync(TimeSpan.FromSeconds(15));
             var overlay = Element<Grid>("PlayerOverlay");
+            var foregroundWindow = Window.GetWindow(overlay)!;
             Check(Window.GetWindow(overlay) is { } host && host != _window, "controls hosted above native VLC in dedicated foreground window");
             var bottom = Element<Border>("PlayerBottomBar");
             Check(bottom.IsVisible && bottom.ActualWidth > 500, "overlay controls laid out over playing video");
@@ -111,6 +112,20 @@ internal sealed class SmokeApp(string[] args) : Application
             _window.Show();
             Call("Home_Click", _window, new RoutedEventArgs());
             Check(!Element<Grid>("PlayerPage").IsVisible && Element<Border>("WindowFooter").IsVisible, "return to catalog restores layout");
+            await Task.Delay(250);
+            Check(!bottom.IsVisible && !foregroundWindow.IsVisible, "return to catalog hides actual VLC foreground window and controls");
+            var ended = new TaskCompletionSource();
+            _window.PlaybackClosed += _ => ended.TrySetResult();
+            _window.Play(new MediaRequest(new Uri(Path.GetFullPath(args[0])), "Завершение серии", 0, Guid.NewGuid().ToString()));
+            await Task.Delay(1500);
+            foregroundWindow = Window.GetWindow(overlay)!;
+            Call("PositionSlider_MouseDown", Element<Slider>("PositionSlider"), new MouseButtonEventArgs(Mouse.PrimaryDevice, 0, MouseButton.Left));
+            Element<Slider>("PositionSlider").Value = 950;
+            Call("CommitSeek");
+            await ended.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            await Task.Delay(300);
+            Check(!Element<Grid>("PlayerPage").IsVisible && Element<Grid>("BrowserPage").IsVisible, "natural completion returns to episode selection page");
+            Check(!bottom.IsVisible && !foregroundWindow.IsVisible, "natural completion hides actual VLC foreground window and controls");
             File.WriteAllText(report, JsonSerializer.Serialize(new { success = true, checks = _checks }, new JsonSerializerOptions { WriteIndented = true }));
             _window.Close(); Shutdown(0);
         }

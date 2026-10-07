@@ -4,11 +4,14 @@
 #ifndef OutputDir
   #define OutputDir "..\artifacts"
 #endif
+#ifndef AppVersion
+  #define AppVersion "1.0.3"
+#endif
 
 [Setup]
 AppId={{C7A5C33F-3531-44A0-AB47-622913A015D9}
 AppName=LampaWin
-AppVersion=1.0.0
+AppVersion={#AppVersion}
 AppPublisher=LampaWin contributors
 DefaultDirName={localappdata}\Programs\LampaWin
 MinVersion=10.0.17763
@@ -42,6 +45,9 @@ Name: "desktopicon"; Description: "Создать ярлык на рабочем
 [Files]
 Source: "{#PublishDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#PublishDir}\components\webview2\MicrosoftEdgeWebView2Setup.exe"; Flags: dontcopy; Check: not IsWebView2Installed
+
+[Registry]
+Root: HKCU; Subkey: "Software\LampaWin"; ValueType: string; ValueName: "InstallPath"; ValueData: "{app}"; Flags: uninsdeletekey
 
 [Icons]
 Name: "{autoprograms}\LampaWin"; Filename: "{app}\LampaWin.exe"

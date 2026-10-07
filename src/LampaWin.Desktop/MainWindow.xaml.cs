@@ -177,6 +177,8 @@ public partial class MainWindow : Window
             BrowserPage.Visibility = Visibility.Collapsed;
             SettingsPage.Visibility = Visibility.Collapsed;
             PlayerPage.Visibility = Visibility.Visible;
+            PlayerOverlay.Visibility = Visibility.Visible;
+            VideoSurface.Visibility = Visibility.Visible;
             PlayPauseButton.Content = "\uE769";
             PlayerSettingsPanel.Visibility = Visibility.Collapsed;
             _lastPointer = null;
@@ -187,6 +189,8 @@ public partial class MainWindow : Window
             Grid.SetRowSpan(MainContentGrid, 2);
 
             PlayerPage.UpdateLayout();
+            if (Window.GetWindow(PlayerOverlay) is { } foreground && foreground != this && !foreground.IsVisible)
+                foreground.Show();
             _player.Play(request);
             ShowPlayerControls();
             if (IsActive) PlayerOverlay.Focus();
@@ -354,6 +358,7 @@ public partial class MainWindow : Window
     private void Home_Click(object sender, RoutedEventArgs e)
     {
         ResetPlayerOverlay();
+        HideVideoSurface();
         _player.Stop();
         PlayerPage.Visibility = Visibility.Collapsed;
         SettingsPage.Visibility = Visibility.Collapsed;
@@ -372,6 +377,7 @@ public partial class MainWindow : Window
     private void Settings_Click(object sender, RoutedEventArgs e)
     {
         ResetPlayerOverlay();
+        HideVideoSurface();
         _player.Stop();
         BrowserPage.Visibility = Visibility.Collapsed;
         PlayerPage.Visibility = Visibility.Collapsed;
@@ -381,6 +387,16 @@ public partial class MainWindow : Window
         WindowFooter.Visibility = Visibility.Visible;
         MainContentGrid.Margin = new Thickness(18, 0, 18, 12);
         Grid.SetRowSpan(MainContentGrid, 1);
+    }
+
+    private void HideVideoSurface()
+    {
+        // VideoView reparents its content into a separate top-level window.
+        // Collapsing PlayerPage alone does not hide that window's controls.
+        PlayerOverlay.Visibility = Visibility.Collapsed;
+        VideoSurface.Visibility = Visibility.Collapsed;
+        if (Window.GetWindow(PlayerOverlay) is { } foreground && foreground != this)
+            foreground.Hide();
     }
 
     private void Player_MouseMove(object sender, MouseEventArgs e)

@@ -33,6 +33,13 @@ public sealed class PlayerController : IDisposable
         _player.EncounteredError += (_, _) => { _state = PlaybackState.Error; ReportDiagnostic("native-encountered-error", "Error"); Emit(_state); };
         _timer = new DispatcherTimer(TimeSpan.FromMilliseconds(500), DispatcherPriority.Background, (_, _) =>
         {
+            // Some streams reach VLCState.Ended without raising EndReached.
+            // Complete the session so the player closes and returns to Lampa.
+            if (_player.State == VLCState.Ended)
+            {
+                FinishNaturally();
+                return;
+            }
             if (_state is PlaybackState.Opening or PlaybackState.Playing or PlaybackState.Paused)
             {
                 _state = _player.State switch

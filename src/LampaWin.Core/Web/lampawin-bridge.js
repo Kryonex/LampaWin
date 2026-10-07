@@ -51,19 +51,8 @@
         if (message.type === 'progress') saveProgress(message.payload);
         if (message.type === 'closed' && current && message.payload.sessionId === current.id) {
             if (message.payload.progress) saveProgress(message.payload.progress);
-            const finished = message.payload.ended;
-            const previous = current.data;
             current = null;
             scheduleSave();
-            if (finished && Array.isArray(previous.playlist)) {
-                const index = previous.playlist.findIndex(item => item.url === previous.url);
-                const next = previous.playlist[index + 1];
-                if (index >= 0 && next && typeof next.url === 'string') {
-                    Lampa.Select.show({ title: 'Следующая серия', items: [{ title: next.title || 'Продолжить', next: true }],
-                        onSelect: () => { Lampa.Select.close(); play(Object.assign({}, next, { playlist: previous.playlist })); },
-                        onBack: () => Lampa.Select.close() });
-                }
-            }
         }
         if (message.type === 'flushProfile') saveProfile();
     });

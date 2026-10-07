@@ -9,6 +9,9 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <AssemblyName>LampaWin</AssemblyName>
     <RootNamespace>LampaWin.Desktop</RootNamespace>
+    <Version>1.0.3</Version>
+    <FileVersion>1.0.3.0</FileVersion>
+    <InformationalVersion>1.0.3</InformationalVersion>
     <ApplicationIcon>Assets\LampaWin.ico</ApplicationIcon>
   </PropertyGroup>
   <ItemGroup>

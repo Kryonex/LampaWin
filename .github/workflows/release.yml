@@ -1,0 +1,75 @@
+name: Build and publish LampaWin release
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: lampawin-release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Check whether this version needs a release
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          [xml]$project = Get-Content -Raw src/LampaWin.Desktop/LampaWin.Desktop.csproj
+          $version = $project.Project.PropertyGroup.Version | Where-Object { $_ } | Select-Object -First 1
+          if ($version -notmatch '^\d+\.\d+\.\d+$') {
+            throw "Application version must use major.minor.patch format: $version"
+          }
+          $tag = "v$version"
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            "release_needed=false" >> $env:GITHUB_OUTPUT
+            Write-Host "Release $tag already exists; no new release is needed."
+          } else {
+            "release_needed=true" >> $env:GITHUB_OUTPUT
+            "app_version=$version" >> $env:GITHUB_OUTPUT
+            Write-Host "Will build and publish release $tag."
+          }
+
+      - name: Acquire pinned app components
+        if: steps.version.outputs.release_needed == 'true'
+        shell: pwsh
+        run: ./tools/packaging/Acquire-Components.ps1
+
+      - name: Build installer and portable archive
+        if: steps.version.outputs.release_needed == 'true'
+        shell: pwsh
+        run: ./tools/packaging/Build-Release.ps1
+
+      - name: Publish GitHub release
+        if: steps.version.outputs.release_needed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          gh release create "v${{ steps.version.outputs.app_version }}" `
+            artifacts/LampaWin-Setup-win-x64.exe `
+            artifacts/LampaWin-win-x64-portable.zip `
+            artifacts/SHA256SUMS.txt `
+            --title "LampaWin v${{ steps.version.outputs.app_version }}" `
+            --generate-notes

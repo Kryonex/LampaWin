@@ -85,6 +85,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/packaging/Build-Releas
 
 Готовые файлы появятся в `artifacts/`: установщик и портативный ZIP. Подробности автоматических проверок и известных ограничений — в [VALIDATION.md](VALIDATION.md).
 
+### Публикация обновления
+
+Чтобы выпустить новую версию, измени `Version`, `FileVersion` и `InformationalVersion` в `src/LampaWin.Desktop/LampaWin.Desktop.csproj` и отправь изменения в ветку `main`. Например, для версии `1.0.3`:
+
+```powershell
+git add src/LampaWin.Desktop/LampaWin.Desktop.csproj
+git commit -m "Release LampaWin 1.0.3"
+git push origin main
+```
+
+Если для этой версии ещё нет релиза, GitHub Actions автоматически соберёт установщик и портативный архив и создаст `v1.0.3` GitHub Release с SHA-256. Установленная LampaWin при следующем запуске предложит обновление; после согласия загрузит установщик, проверит контрольную сумму, установит новую версию и перезапустится. Профиль и настройки в `%LOCALAPPDATA%\LampaWin` сохраняются. Портативную копию нужно обновить вручную.
+
 ## Лицензии
 
 Собственный код LampaWin распространяется под MIT. Lampa и Jackett используют GPL-2.0, TorrServer — GPL-3.0, LibVLC и LibVLCSharp — LGPL. Условия и сведения о включённых компонентах приведены в [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) и в дистрибутиве. Лицензия LampaWin не заменяет лицензии сторонних компонентов.

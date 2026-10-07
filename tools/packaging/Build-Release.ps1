@@ -8,8 +8,10 @@ $dotnetRoot = Split-Path -Parent $dotnet
 $desktop = Join-Path $root 'src/LampaWin.Desktop/LampaWin.Desktop.csproj'
 $jackettSource = Join-Path $root '.cache/jackett-source/src/Jackett.Server/Jackett.Server.csproj'
 $publish = Join-Path $root 'artifacts/publish'
+$lgplLicense = Join-Path $root 'licenses/LGPL-2.1-or-later.txt'
 if (!(Test-Path $dotnet)) { throw "Local .NET SDK missing: $dotnet" }
 if (!(Test-Path $desktop)) { throw "Desktop project missing: $desktop" }
+if (!(Test-Path $lgplLicense)) { throw "Required third-party license is missing: $lgplLicense" }
 if (!(Test-Path (Join-Path $root 'components/lampa/index.html'))) { throw 'Run Acquire-Components.ps1 first (Lampa bundle missing)' }
 if (!(Test-Path (Join-Path $root 'components/torrserver/TorrServer.exe'))) { throw 'Run Acquire-Components.ps1 first (TorrServer missing)' }
 
@@ -67,7 +69,8 @@ foreach ($copy in $licenseCopies) {
     if (!(Test-Path -LiteralPath $copy[0])) { throw "Required third-party notice file is missing: $($copy[0])" }
     Copy-Item -LiteralPath $copy[0] -Destination (Join-Path $licenses $copy[1]) -Force
 }
-Copy-Item -LiteralPath (Join-Path $root 'artifacts/source/LGPL-2.1-or-later.txt') -Destination (Join-Path $licenses 'LGPL-2.1-or-later.txt') -Force
+Copy-Item -LiteralPath $lgplLicense -Destination (Join-Path $licenses 'LGPL-2.1-or-later.txt') -Force
+Copy-Item -LiteralPath $lgplLicense -Destination (Join-Path $root 'artifacts/source/LGPL-2.1-or-later.txt') -Force
 @'
 MIT License
 
@@ -99,7 +102,7 @@ $sourceStageFull = [IO.Path]::GetFullPath($sourceStage)
 if (!$sourceStageFull.StartsWith($artifactsRoot + [IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)) { throw "Refusing to create source staging outside artifacts: $sourceStageFull" }
 if (Test-Path -LiteralPath $sourceStageFull) { Remove-Item -LiteralPath $sourceStageFull -Recurse -Force }
 New-Item -ItemType Directory -Force $sourceStageFull | Out-Null
-foreach ($relative in @('src','tests','tools/packaging','tools/runtime','tools/testing','installer','config','THIRD-PARTY-NOTICES.md','README.md','LICENSE','global.json','Directory.Build.props','NuGet.Config','LampaWin.sln')) {
+foreach ($relative in @('src','tests','tools/packaging','tools/runtime','tools/testing','installer','config','licenses','THIRD-PARTY-NOTICES.md','README.md','LICENSE','global.json','Directory.Build.props','NuGet.Config','LampaWin.sln')) {
     $from = Join-Path $root $relative
     if (!(Test-Path -LiteralPath $from)) { continue }
     if ((Get-Item -LiteralPath $from).PSIsContainer) {

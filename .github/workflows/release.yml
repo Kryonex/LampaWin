@@ -37,9 +37,11 @@ jobs:
         run: |
           [xml]$project = Get-Content -Raw src/LampaWin.Desktop/LampaWin.Desktop.csproj
           $version = $project.Project.PropertyGroup.Version | Where-Object { $_ } | Select-Object -First 1
-          if ($version -notmatch '^\d+\.\d+\.\d+$') {
-            throw "Application version must use major.minor.patch format: $version"
+          if ($version -notmatch '^\d+\.\d+\.\d+(\.\d+)?$') {
+            throw "Application version must use major.minor.patch[.revision] format: $version"
           }
+          $releaseVersion = $project.Project.PropertyGroup.ReleaseVersion | Where-Object { $_ } | Select-Object -First 1
+          if (!$releaseVersion) { $releaseVersion = $version }
           $tag = "v$version"
           $PSNativeCommandUseErrorActionPreference = $false
           gh release view $tag *> $null
@@ -49,6 +51,7 @@ jobs:
           } else {
             "release_needed=true" >> $env:GITHUB_OUTPUT
             "app_version=$version" >> $env:GITHUB_OUTPUT
+            "release_version=$releaseVersion" >> $env:GITHUB_OUTPUT
             Write-Host "Will build and publish release $tag."
           }
           $global:LASTEXITCODE = 0
@@ -69,11 +72,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
-          $notesFile = "releases/${{ steps.version.outputs.app_version }}.md"
+          $notesFile = "releases/${{ steps.version.outputs.release_version }}.md"
           $notesArguments = if (Test-Path -LiteralPath $notesFile) { @('--notes-file', $notesFile) } else { @('--generate-notes') }
           gh release create "v${{ steps.version.outputs.app_version }}" `
             artifacts/LampaWin-Setup-win-x64.exe `
             artifacts/LampaWin-win-x64-portable.zip `
             artifacts/SHA256SUMS.txt `
-            --title "LampaWin v${{ steps.version.outputs.app_version }}" `
+            --title "LampaWin ${{ steps.version.outputs.release_version }}" `
+            --latest `
             @notesArguments

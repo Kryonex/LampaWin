@@ -113,6 +113,15 @@ internal sealed class SmokeApp(string[] args) : Application
             Call("HidePlayerControls");
             await Task.Delay(250);
             Check(bottom.Opacity > .99, "food panel keeps player controls accessible");
+            var foodPanel = (FoodPanel)foodHost.Child;
+            var expandButton = (Button)typeof(FoodPanel).GetField("_expand", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(foodPanel)!;
+            expandButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await Task.Delay(150);
+            Check(foodHost.ActualWidth > 460 && foodHost.ActualWidth <= overlay.ActualWidth - foodHost.Margin.Right
+                && Window.GetWindow(foodHost) == foregroundWindow, "food panel expands within video without creating another window");
+            expandButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await Task.Delay(150);
+            Check(foodHost.ActualWidth >= 360 && foodHost.ActualWidth <= 460, "food panel returns to compact width");
             Click("FoodButton");
             var actualPlayer = (PlayerController)typeof(MainWindow).GetField("_player", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(_window)!;
             Check(!foodHost.IsVisible && actualPlayer.MediaPlayer.IsPlaying, "closing food panel leaves film playing");
@@ -193,6 +202,13 @@ internal sealed class SmokeApp(string[] args) : Application
             volume.Value = 37;
             Click("MuteButton"); Check(volume.Value == 0, "mute button mutes");
             Click("MuteButton"); Check(volume.Value == 37, "unmute restores previous volume");
+            var audioPosition = actualPlayer.MediaPlayer.Time;
+            var audioState = actualPlayer.MediaPlayer.State;
+            Click("RestoreAudioButton");
+            await Task.Delay(200);
+            Check(actualPlayer.MediaPlayer.Volume == 37 && actualPlayer.MediaPlayer.State == audioState
+                && Math.Abs(actualPlayer.MediaPlayer.Time - audioPosition) < 1000,
+                "restore audio button keeps volume, player state and timeline");
             Click("PlayerSettingsButton");
             Check(Element<Border>("PlayerSettingsPanel").IsVisible, "settings menu opens over native video");
             Element<ComboBox>("AudioTracks").IsDropDownOpen = true;
@@ -321,13 +337,13 @@ internal sealed class SmokeApp(string[] args) : Application
     {
         _window.Play(new MediaRequest(FixtureUri, "Food panel fixture", 0, Guid.NewGuid().ToString()));
         await Task.Delay(500);
+        Click("PlayPauseButton");
         var root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../.."));
         var profile = Path.Combine(root, ".cache/food-profile-smoke/burgerking");
         var panel = new FoodPanel(Path.GetDirectoryName(profile)!, _ => throw new InvalidOperationException("No external browser expected"));
         var host = Element<Border>("FoodPanelHost"); host.Child = panel; host.Visibility = Visibility.Visible;
         if (args.Contains("--food-sites"))
         {
-            Click("PlayPauseButton");
             var observations = new List<object>();
             foreach (var service in LampaWin.Core.FoodServices.All)
             {
@@ -335,10 +351,28 @@ internal sealed class SmokeApp(string[] args) : Application
                 var browsers = (Dictionary<string, Microsoft.Web.WebView2.Wpf.WebView2CompositionControl>)typeof(FoodPanel).GetField("_browsers", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(panel)!;
                 var site = browsers[service.Id].CoreWebView2;
                 await Task.Delay(12000);
-                observations.Add(new { service = service.Title, page = await site.ExecuteScriptAsync("JSON.stringify({title:document.title,ready:document.readyState,bodyLength:document.body?.innerText.length,inputs:document.querySelectorAll('input').length})") });
+                var page = JsonSerializer.Deserialize<JsonElement>(await site.ExecuteScriptAsync("({title:document.title,ready:document.readyState,bodyLength:document.body?.innerText.length,inputs:document.querySelectorAll('input').length,width:innerWidth,screenWidth:screen.width,scrollWidth:document.documentElement.scrollWidth,viewport:document.querySelector('meta[name=viewport]')?.content,ua:navigator.userAgent,mobile:navigator.userAgentData?.mobile})"));
+                Check(page.GetProperty("ready").GetString() == "complete" && page.GetProperty("bodyLength").GetInt32() > 1000,
+                    $"{service.Title} loaded its real service interface");
+                Check(page.GetProperty("scrollWidth").GetInt32() <= page.GetProperty("width").GetInt32() + 1,
+                    $"{service.Title} fits the compact panel without document overflow");
+                observations.Add(new { service = service.Title, page });
+                File.WriteAllText(report, JsonSerializer.Serialize(new { observations }, new JsonSerializerOptions { WriteIndented = true }));
+                using var screenshot = File.Create(Path.ChangeExtension(report, $".{service.Id}.png"));
+                await site.CapturePreviewAsync(Microsoft.Web.WebView2.Core.CoreWebView2CapturePreviewImageFormat.Png, screenshot).WaitAsync(TimeSpan.FromSeconds(15));
+                foreach (var width in new[] { 360d, 460d, 900d })
+                {
+                    host.Width = width;
+                    await Task.Delay(500);
+                    var layout = JsonSerializer.Deserialize<JsonElement>(await site.ExecuteScriptAsync("({width:innerWidth,scrollWidth:document.documentElement.scrollWidth,screenWidth:screen.width})"));
+                    Check(layout.GetProperty("scrollWidth").GetDouble() <= layout.GetProperty("width").GetDouble() + 1
+                        && Math.Abs(layout.GetProperty("width").GetDouble() - browsers[service.Id].ActualWidth) <= 1,
+                        $"{service.Title} fits after resize to {width}px");
+                }
+                host.Width = 460;
             }
             panel.Dispose();
-            File.WriteAllText(report, JsonSerializer.Serialize(new { observations, authenticatedCheckoutTested = false }, new JsonSerializerOptions { WriteIndented = true }));
+            File.WriteAllText(report, JsonSerializer.Serialize(new { success = true, observations, checks = _checks, authenticatedCheckoutTested = false }, new JsonSerializerOptions { WriteIndented = true }));
             return;
         }
         var sites = (Grid)typeof(FoodPanel).GetField("_sites", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(panel)!;
@@ -346,7 +380,7 @@ internal sealed class SmokeApp(string[] args) : Application
         var view = new Microsoft.Web.WebView2.Wpf.WebView2CompositionControl(); sites.Children.Add(view);
         ((StackPanel)typeof(FoodPanel).GetField("_picker", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(panel)!).Visibility = Visibility.Collapsed;
         var environment = await Microsoft.Web.WebView2.Core.CoreWebView2Environment.CreateAsync(null, profile);
-        await ((Task)typeof(FoodPanel).GetMethod("InitializeAsync", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(panel, [view, environment])!).WaitAsync(TimeSpan.FromSeconds(25));
+        await ((Task)typeof(FoodPanel).GetMethod("InitializeAsync", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(panel, [view, environment, true])!).WaitAsync(TimeSpan.FromSeconds(25));
         var core = view.CoreWebView2;
         core.SetVirtualHostNameToFolderMapping("food-test.example", Path.Combine(root, "tools/testing/food-fixture"), Microsoft.Web.WebView2.Core.CoreWebView2HostResourceAccessKind.DenyCors);
         var loaded = new TaskCompletionSource(); core.NavigationCompleted += (_, e) => { if (e.IsSuccess) loaded.TrySetResult(); };
@@ -360,6 +394,17 @@ internal sealed class SmokeApp(string[] args) : Application
         var centerPixel = new byte[4];
         webBitmap.CopyPixels(new Int32Rect(webBitmap.PixelWidth / 2, webBitmap.PixelHeight / 2, 1, 1), centerPixel, 4, 0);
         Check(centerPixel[1] > 120 && centerPixel[2] < 80 && centerPixel[0] < 140, "web page pixels render inside transparent VLC foreground, not just an invisible DOM");
+        foreach (var width in new[] { 360d, 460d, 900d, 360d })
+        {
+            host.Width = width;
+            await Task.Delay(400);
+            var layout = JsonSerializer.Deserialize<JsonElement>(await core.ExecuteScriptAsync("({width:innerWidth,screen:screen.width,scroll:document.documentElement.scrollWidth,mobile:navigator.userAgentData.mobile,input:document.querySelector('input').getBoundingClientRect().right})"));
+            Check(Math.Abs(layout.GetProperty("width").GetDouble() - view.ActualWidth) <= 1
+                && Math.Abs(layout.GetProperty("screen").GetDouble() - view.ActualWidth) <= 1
+                && layout.GetProperty("scroll").GetDouble() <= layout.GetProperty("width").GetDouble() + 1
+                && layout.GetProperty("input").GetDouble() <= layout.GetProperty("width").GetDouble()
+                && layout.GetProperty("mobile").GetBoolean(), $"mobile viewport and address field fit after resize to {width}px without reload");
+        }
         if (args.Contains("--food-write"))
         {
             await core.ExecuteScriptAsync("localStorage.setItem('food-smoke','persisted'); document.cookie='foodSmoke=persisted; max-age=86400; secure; samesite=lax; path=/';");
@@ -380,10 +425,32 @@ internal sealed class SmokeApp(string[] args) : Application
         var popupViews = (List<Microsoft.Web.WebView2.Wpf.WebView2CompositionControl>)typeof(FoodPanel).GetField("_popups", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(panel)!;
         for (var attempt = 0; attempt < 50 && (popupViews.Count == 0 || popupViews[0].CoreWebView2 is null); attempt++) await Task.Delay(100);
         Check(popupViews.Count == 1 && popupViews[0].CoreWebView2 is not null && Window.GetWindow(popupViews[0]) == Window.GetWindow(host), "auth popup remains inside the food panel");
+        for (var attempt = 0; attempt < 50 && !popupViews[0].CoreWebView2.Source.StartsWith("https://food-test.example"); attempt++) await Task.Delay(100);
+        // Virtual host mappings belong to a CoreWebView2, not its shared profile.
+        popupViews[0].CoreWebView2.SetVirtualHostNameToFolderMapping("food-test.example", Path.Combine(root, "tools/testing/food-fixture"), Microsoft.Web.WebView2.Core.CoreWebView2HostResourceAccessKind.DenyCors);
+        var popupLoaded = new TaskCompletionSource();
+        popupViews[0].CoreWebView2.NavigationCompleted += (_, e) => { if (e.IsSuccess) popupLoaded.TrySetResult(); };
+        popupViews[0].CoreWebView2.Navigate("https://food-test.example/index.html");
+        await popupLoaded.Task.WaitAsync(TimeSpan.FromSeconds(10));
         await Task.Delay(300);
+        var popupLayout = JsonSerializer.Deserialize<JsonElement>(await popupViews[0].CoreWebView2.ExecuteScriptAsync("({width:innerWidth,screen:screen.width,mobile:navigator.userAgentData.mobile})"));
+        Check(Math.Abs(popupLayout.GetProperty("width").GetDouble() - popupViews[0].ActualWidth) <= 1
+            && Math.Abs(popupLayout.GetProperty("screen").GetDouble() - popupViews[0].ActualWidth) <= 1,
+            "embedded auth popup fits the compact viewport");
+        Check(view.CoreWebView2 is not null, "original browser still alive while popup is open");
         await popupViews[0].CoreWebView2.ExecuteScriptAsync("window.close()");
         await Task.Delay(300);
         Check(popupViews.Count == 0 && view.Visibility == Visibility.Visible, "closing embedded auth popup restores its original service browser");
+        core = view.CoreWebView2!;
+        Check(core is not null && Window.GetWindow(view)!.IsVisible, "closing auth popup preserves the original browser and video foreground");
+        await core!.ExecuteScriptAsync("window.geoResult='pending'; navigator.geolocation.getCurrentPosition(()=>window.geoResult='allowed',()=>window.geoResult='denied')");
+        var permissionPrompt = (StackPanel)typeof(FoodPanel).GetField("_permissionPrompt", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(panel)!;
+        for (var attempt = 0; attempt < 50 && permissionPrompt.Visibility != Visibility.Visible; attempt++) await Task.Delay(100);
+        Check(permissionPrompt.IsVisible, "geolocation request appears inside WPF food panel without a native browser bubble");
+        ((Button)((StackPanel)permissionPrompt.Children[1]).Children[1]).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        await Task.Delay(300);
+        Check(permissionPrompt.Visibility == Visibility.Collapsed && (await core.ExecuteScriptAsync("window.geoResult")).Contains("denied"),
+            "declining geolocation completes the browser request and restores the page");
         view.Dispose(); panel.Dispose();
         File.WriteAllText(report, JsonSerializer.Serialize(new { success = true, checks = _checks }, new JsonSerializerOptions { WriteIndented = true }));
     }

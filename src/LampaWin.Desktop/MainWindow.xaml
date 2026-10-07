@@ -159,6 +159,7 @@
                 <DockPanel Margin="0,0,0,18"><TextBlock Text="Настройки видео" FontWeight="SemiBold" FontSize="16" Foreground="White" VerticalAlignment="Center"/><Button DockPanel.Dock="Right" Content="&#xE711;" Style="{StaticResource PlayerButton}" Width="28" Height="28" FontSize="14" Click="PlayerSettings_Click" ToolTip="Закрыть настройки"/></DockPanel>
                 <TextBlock Text="Аудиодорожка" Foreground="#BBBBCC" Margin="0,0,0,8"/>
                 <ComboBox x:Name="AudioTracks" Style="{StaticResource TrackPicker}" SelectionChanged="AudioTracks_SelectionChanged" AutomationProperties.Name="Аудиодорожка"/>
+                <Button x:Name="RestoreAudioButton" Content="Восстановить звук" Click="RestoreAudio_Click" Margin="0,10,0,0" Padding="10,7" ToolTip="Подключить звук к текущему устройству Windows без перезапуска фильма" AutomationProperties.Name="Восстановить звук"/>
                 <TextBlock Text="Субтитры" Foreground="#BBBBCC" Margin="0,18,0,8"/>
                 <ComboBox x:Name="SubtitleTracks" Style="{StaticResource TrackPicker}" SelectionChanged="SubtitleTracks_SelectionChanged" AutomationProperties.Name="Субтитры"/>
               </StackPanel>

@@ -25,6 +25,9 @@ public sealed class PlayerController : IDisposable
     private readonly SeekPreviewDecoder _previewDecoder = new();
     private CancellationTokenSource? _previewWarmup;
     private bool _previewPrimed;
+    private readonly AudioDeviceMonitor? _audioDevices;
+    private readonly DispatcherTimer _audioRecoveryTimer;
+    private int _volume = 80;
 
     public PlayerController(Dispatcher dispatcher)
     {
@@ -32,6 +35,18 @@ public sealed class PlayerController : IDisposable
         LibVLCSharp.Shared.Core.Initialize();
         _libVlc = new LibVLC();
         _player = new MediaPlayer(_libVlc);
+        _audioRecoveryTimer = new DispatcherTimer(TimeSpan.FromMilliseconds(600), DispatcherPriority.Background, (_, _) =>
+        {
+            _audioRecoveryTimer!.Stop();
+            RestoreAudioOutput();
+        }, dispatcher);
+        _audioRecoveryTimer.Stop();
+        try
+        {
+            _audioDevices = new AudioDeviceMonitor(dispatcher);
+            _audioDevices.OutputChanged += QueueAudioRecovery;
+        }
+        catch (System.Runtime.InteropServices.COMException) { ReportDiagnostic("audio-device-monitor-unavailable", "Warning"); }
         _libVlc.Log += OnLibVlcLog;
         _player.Playing += (_, _) =>
         {
@@ -149,7 +164,33 @@ public sealed class PlayerController : IDisposable
         }
     }
 
-    public void SetVolume(double value) => _player.Volume = (int)Math.Clamp(double.IsFinite(value) ? value : 0, 0, 100);
+    public void SetVolume(double value)
+    {
+        _volume = (int)Math.Clamp(double.IsFinite(value) ? value : 0, 0, 100);
+        _player.Volume = _volume;
+    }
+
+    private void QueueAudioRecovery()
+    {
+        if (_disposed || _sessionId is null) return;
+        _audioRecoveryTimer.Stop();
+        _audioRecoveryTimer.Start();
+    }
+
+    public void RestoreAudioOutput()
+    {
+        if (_disposed || _sessionId is null || _player.Media is null) return;
+        _audioRecoveryTimer.Stop();
+        if (_audioDevices is { DefaultOutputId: null })
+        { ReportDiagnostic("audio-output-unavailable", "Warning"); return; }
+        // LibVLC 3 requires an empty device ID to reacquire the system default.
+        // A null device ID is ignored. Switching the output module would require
+        // restarting the movie; this restarts only the active audio output.
+        _player.SetOutputDevice(string.Empty, null);
+        _player.Volume = _volume;
+        _player.Mute = false; // UI mute is represented by volume=0, which stays zero.
+        ReportDiagnostic("audio-output-rebound", "Info");
+    }
     public void SetAudioTrack(int id) => _player.SetAudioTrack(id);
     public void SetSubtitleTrack(int id) => _player.SetSpu(id);
     public IReadOnlyList<TrackDescription> AudioTracks => _player.AudioTrackDescription?.ToArray() ?? [];
@@ -157,6 +198,7 @@ public sealed class PlayerController : IDisposable
 
     public void Stop()
     {
+        _audioRecoveryTimer.Stop();
         _previewWarmup?.Cancel();
         _previewWarmup?.Dispose();
         _previewWarmup = null;
@@ -247,6 +289,11 @@ public sealed class PlayerController : IDisposable
         Stop();
         _disposed = true;
         _timer.Stop();
+        if (_audioDevices is not null)
+        {
+            _audioDevices.OutputChanged -= QueueAudioRecovery;
+            _audioDevices.Dispose();
+        }
         _libVlc.Log -= OnLibVlcLog;
         _player.Dispose();
         _libVlc.Dispose();

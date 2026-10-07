@@ -90,7 +90,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/packaging/Build-Releas
 
 ### Публикация обновления
 
-Чтобы выпустить новую версию, измени `Version`, `FileVersion` и `InformationalVersion` в `src/LampaWin.Desktop/LampaWin.Desktop.csproj` и отправь изменения в ветку `main`. Например, для версии `2.0.0`:
+Чтобы выпустить новую версию, измени `Version`, `AssemblyVersion`, `FileVersion` и `InformationalVersion` в `src/LampaWin.Desktop/LampaWin.Desktop.csproj` и отправь изменения в ветку `main`. `Version` — числовой номер из трёх или четырёх частей для сравнения обновлений. `ReleaseVersion` задаёт название выпуска и имя файла описания в `releases/`; если поле отсутствует, используется `Version`. Например, выпуск **2.0.0b** использует числовой номер **2.0.0.1**, название `ReleaseVersion`/`InformationalVersion` — **2.0.0b** и описание `releases/2.0.0b.md`. Для версии `2.0.0`:
 
 ```powershell
 git add src/LampaWin.Desktop/LampaWin.Desktop.csproj

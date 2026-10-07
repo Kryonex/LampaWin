@@ -5,13 +5,19 @@
   #define OutputDir "..\artifacts"
 #endif
 #ifndef AppVersion
-  #define AppVersion "2.0.0"
+  #define AppVersion "2.0.0b"
+#endif
+#ifndef AppFileVersion
+  #define AppFileVersion "2.0.0.1"
 #endif
 
 [Setup]
 AppId={{C7A5C33F-3531-44A0-AB47-622913A015D9}
 AppName=LampaWin
 AppVersion={#AppVersion}
+VersionInfoVersion={#AppFileVersion}
+VersionInfoProductVersion={#AppFileVersion}
+VersionInfoProductTextVersion={#AppVersion}
 AppPublisher=LampaWin contributors
 DefaultDirName={localappdata}\Programs\LampaWin
 MinVersion=10.0.17763

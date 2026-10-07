@@ -19,6 +19,7 @@ public partial class MainWindow : Window
 {
     private readonly PlayerController _player;
     private FoodPanel? _foodPanel;
+    private bool _foodExpanded;
     private string _foodProfileRoot = Path.Combine(new LampaWin.Core.AppPaths(AppContext.BaseDirectory).DataRoot, "food-webview");
     private readonly ObservableCollection<string> _sources = [];
     private IReadOnlyList<string> _sourceWarnings = [];
@@ -80,7 +81,7 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
-        PlayerOverlay.SizeChanged += (_, _) => FoodPanelHost.Width = Math.Clamp(PlayerOverlay.ActualWidth * 0.4, 360, 460);
+        PlayerOverlay.SizeChanged += (_, _) => UpdateFoodPanelWidth();
         SourcesList.ItemsSource = _sources;
         _player = new PlayerController(Dispatcher);
         _player.SetVolume(VolumeSlider.Value);
@@ -523,6 +524,7 @@ public partial class MainWindow : Window
         MuteButton.ToolTip = e.NewValue > 0 ? "Выключить звук (M)" : "Включить звук (M)";
     }
     private void Mute_Click(object sender, RoutedEventArgs e) => ToggleMute();
+    private void RestoreAudio_Click(object sender, RoutedEventArgs e) => _player.RestoreAudioOutput();
     private void ToggleMute()
     {
         if (VolumeSlider.Value > 0) { _volumeBeforeMute = VolumeSlider.Value; VolumeSlider.Value = 0; }
@@ -619,12 +621,26 @@ public partial class MainWindow : Window
                 catch (Exception) { FooterStatus.Text = "Не удалось открыть браузер."; }
             });
             _foodPanel.CloseRequested += () => { FoodPanelHost.Visibility = Visibility.Collapsed; PlayerOverlay.Focus(); };
+            _foodPanel.ExpandRequested += () =>
+            {
+                _foodExpanded = !_foodExpanded;
+                _foodPanel.SetExpanded(_foodExpanded);
+                UpdateFoodPanelWidth();
+            };
             FoodPanelHost.Child = _foodPanel;
         }
         PlayerSettingsPanel.Visibility = Visibility.Collapsed;
-        FoodPanelHost.Width = Math.Clamp(PlayerOverlay.ActualWidth * 0.4, 360, 460);
+        UpdateFoodPanelWidth();
         FoodPanelHost.Visibility = FoodPanelHost.Visibility == Visibility.Visible ? Visibility.Collapsed : Visibility.Visible;
         ShowPlayerControls();
+    }
+
+    private void UpdateFoodPanelWidth()
+    {
+        var available = Math.Max(1, PlayerOverlay.ActualWidth - FoodPanelHost.Margin.Left - FoodPanelHost.Margin.Right);
+        FoodPanelHost.Width = Math.Min(available, _foodExpanded
+            ? Math.Clamp(PlayerOverlay.ActualWidth * 0.72, 640, 960)
+            : Math.Clamp(PlayerOverlay.ActualWidth * 0.4, 360, 460));
     }
 
     private void Player_MouseMove(object sender, MouseEventArgs e)

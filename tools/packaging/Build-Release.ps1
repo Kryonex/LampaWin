@@ -4,6 +4,7 @@ $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 $localDotnet = Join-Path $root '.tools/dotnet/dotnet.exe'
 $dotnet = if (Test-Path $localDotnet) { $localDotnet } else { (Get-Command dotnet -ErrorAction Stop).Source }
+$dotnetRoot = Split-Path -Parent $dotnet
 $desktop = Join-Path $root 'src/LampaWin.Desktop/LampaWin.Desktop.csproj'
 $jackettSource = Join-Path $root '.cache/jackett-source/src/Jackett.Server/Jackett.Server.csproj'
 $publish = Join-Path $root 'artifacts/publish'
@@ -59,8 +60,8 @@ $licenseCopies = @(
     @("$nuget/microsoft.web.webview2/1.0.4258.31/LICENSE.txt", 'Microsoft.Web.WebView2-LICENSE.txt'),
     @("$nuget/microsoft.web.webview2/1.0.4258.31/NOTICE.txt", 'Microsoft.Web.WebView2-NOTICE.txt'),
     @("$nuget/system.security.cryptography.protecteddata/10.0.0/THIRD-PARTY-NOTICES.TXT", 'System.Security.Cryptography.ProtectedData-THIRD-PARTY-NOTICES.txt'),
-    @("$root/.tools/dotnet/ThirdPartyNotices.txt", 'dotnet-ThirdPartyNotices.txt'),
-    @("$root/.tools/dotnet/LICENSE.txt", 'dotnet-LICENSE.txt')
+    @("$dotnetRoot/ThirdPartyNotices.txt", 'dotnet-ThirdPartyNotices.txt'),
+    @("$dotnetRoot/LICENSE.txt", 'dotnet-LICENSE.txt')
 )
 foreach ($copy in $licenseCopies) {
     if (!(Test-Path -LiteralPath $copy[0])) { throw "Required third-party notice file is missing: $($copy[0])" }

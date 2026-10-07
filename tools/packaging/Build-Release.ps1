@@ -12,11 +12,11 @@ if (!(Test-Path $desktop)) { throw "Desktop project missing: $desktop" }
 if (!(Test-Path (Join-Path $root 'components/lampa/index.html'))) { throw 'Run Acquire-Components.ps1 first (Lampa bundle missing)' }
 if (!(Test-Path (Join-Path $root 'components/torrserver/TorrServer.exe'))) { throw 'Run Acquire-Components.ps1 first (TorrServer missing)' }
 
-if (!(Test-Path (Join-Path $root 'components/jackett/JackettConsole.exe'))) { throw 'JackettConsole.exe missing from publish output' }
 if (!$SkipJackettPublish) {
     & $dotnet publish $jackettSource -c Release -f net9.0 -r win-x64 --self-contained true -p:TargetFrameworks=net9.0 -p:Version=0.24.2798 -p:AssemblyVersion=0.24.2798 -p:FileVersion=0.24.2798 -p:InformationalVersion=0.24.2798 --source https://api.nuget.org/v3/index.json -o (Join-Path $root 'components/jackett')
     if ($LASTEXITCODE) { throw 'Patched Jackett source publish failed' }
 }
+if (!(Test-Path (Join-Path $root 'components/jackett/JackettConsole.exe'))) { throw 'JackettConsole.exe missing from publish output' }
 
 $artifactsRoot = (Resolve-Path (Join-Path $root 'artifacts')).Path
 $publishFull = [IO.Path]::GetFullPath($publish)

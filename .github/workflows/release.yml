@@ -1,20 +1,44 @@
-name: Build and publish LampaWin release
+name: Validate and publish LampaWin
 
 on:
   push:
-    branches:
-      - main
+  pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: lampawin-release-${{ github.ref }}
   cancel-in-progress: false
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  release:
+  validate:
     runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Build and run focused checks
+        shell: pwsh
+        run: ./tools/testing/Run-Checks.ps1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: validation-report
+          path: artifacts/checks/*.json
+
+  release:
+    needs: validate
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    permissions:
+      contents: write
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -64,7 +88,34 @@ jobs:
       - name: Build installer and portable archive
         if: steps.version.outputs.release_needed == 'true'
         shell: pwsh
-        run: ./tools/packaging/Build-Release.ps1
+        env:
+          SIGNING_PFX_BASE64: ${{ secrets.LAMPAWIN_SIGNING_PFX_BASE64 }}
+          SIGNING_PFX_PASSWORD: ${{ secrets.LAMPAWIN_SIGNING_PFX_PASSWORD }}
+          LAMPAWIN_TIMESTAMP_SERVER: ${{ vars.LAMPAWIN_TIMESTAMP_SERVER }}
+        run: |
+          $certificateFile = Join-Path $env:RUNNER_TEMP 'lampawin-signing.pfx'
+          try {
+            if ($env:SIGNING_PFX_BASE64) {
+              [IO.File]::WriteAllBytes($certificateFile, [Convert]::FromBase64String($env:SIGNING_PFX_BASE64))
+              $password = ConvertTo-SecureString $env:SIGNING_PFX_PASSWORD -AsPlainText -Force
+              $certificate = Import-PfxCertificate -FilePath $certificateFile -CertStoreLocation Cert:\CurrentUser\My -Password $password
+              $env:LAMPAWIN_SIGNING_THUMBPRINT = $certificate.Thumbprint
+            }
+            ./tools/packaging/Build-Release.ps1
+          } finally {
+            if (Test-Path -LiteralPath $certificateFile) { Remove-Item -LiteralPath $certificateFile -Force }
+            if ($certificate) { Remove-Item -LiteralPath ("Cert:\CurrentUser\My\" + $certificate.Thumbprint) -Force }
+          }
+
+      - name: Verify the assembled application offline
+        if: steps.version.outputs.release_needed == 'true'
+        shell: pwsh
+        run: |
+          $process = Start-Process -FilePath artifacts/publish/LampaWin.exe -ArgumentList @('--verify-package', '--fixture', ((Resolve-Path tests/assets/player-fixture.mp4).Path), '--report', ((Join-Path $pwd 'artifacts/package-check.json'))) -PassThru -WindowStyle Hidden
+          if (!$process.WaitForExit(60000)) { Stop-Process -Id $process.Id -Force; throw 'Package verification timeout' }
+          if ($process.ExitCode -ne 0) { throw 'Package verification failed' }
+          $report = Get-Content -Raw artifacts/package-check.json | ConvertFrom-Json
+          if (!$report.success) { throw 'Package report failed' }
 
       - name: Publish GitHub release
         if: steps.version.outputs.release_needed == 'true'
@@ -74,10 +125,12 @@ jobs:
         run: |
           $notesFile = "releases/${{ steps.version.outputs.release_version }}.md"
           $notesArguments = if (Test-Path -LiteralPath $notesFile) { @('--notes-file', $notesFile) } else { @('--generate-notes') }
+          $signatureArguments = if (Test-Path artifacts/SHA256SUMS.txt.p7s) { @('artifacts/SHA256SUMS.txt.p7s') } else { @() }
           gh release create "v${{ steps.version.outputs.app_version }}" `
             artifacts/LampaWin-Setup-win-x64.exe `
             artifacts/LampaWin-win-x64-portable.zip `
             artifacts/SHA256SUMS.txt `
+            @signatureArguments `
             --title "LampaWin ${{ steps.version.outputs.release_version }}" `
             --latest `
             @notesArguments

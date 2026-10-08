@@ -93,6 +93,13 @@ backend.MapGet("/stream", async context =>
 });
 backend.MapGet("/api/v2.0/indexers/all/results", async context =>
 {
+    if (context.Request.Query.ContainsKey("oversized"))
+    {
+        context.Response.ContentType = "application/json";
+        var chunk = new string('x', 131072);
+        for (var i = 0; i < 136 && !context.RequestAborted.IsCancellationRequested; i++) await context.Response.WriteAsync(chunk, context.RequestAborted);
+        return;
+    }
     sawInjectedKey = context.Request.Query["apikey"] == apiKey && context.Request.Query["Query"] == "fixture";
     context.Response.ContentType = "application/json";
     await context.Response.WriteAsync(JsonSerializer.Serialize(new { Results = new object[]
@@ -121,6 +128,7 @@ try
     Assert(login.StatusCode == HttpStatusCode.Redirect, "bootstrap authenticates and redirects");
     Assert(login.Headers.GetValues("Set-Cookie").Single().Contains("httponly", StringComparison.OrdinalIgnoreCase), "session cookie HttpOnly");
     Assert((await client.GetAsync(gateway.LoginUri)).StatusCode == HttpStatusCode.Forbidden, "bootstrap token single use");
+    Assert((await client.GetAsync(gateway.RenewLoginUri())).StatusCode == HttpStatusCode.Redirect, "recreated browser can authenticate with a fresh one-use bootstrap");
     var html = await client.GetStringAsync(gateway.Origin);
     Assert(html.Contains("/lampawin-bridge.js"), "Lampa integration injected");
     Assert((await client.GetStringAsync(new Uri(gateway.Origin, "test.js"))).Contains("fixture=true"), "bundled assets served");
@@ -161,8 +169,24 @@ try
     Assert(profile.Load()["history"] == "fixture-watch-position-42", "profile roundtrip survives origin changes");
     var stored = await File.ReadAllBytesAsync(Path.Combine(paths.DataRoot, "lampa-profile.bin"));
     Assert(!Encoding.UTF8.GetString(stored).Contains("fixture-watch-position"), "profile encrypted with user DPAPI");
+    await profile.SaveAsync(new() { ["history"] = "new-position" });
     await File.WriteAllBytesAsync(Path.Combine(paths.DataRoot, "lampa-profile.bin"), [1, 2, 3]);
-    Assert(profile.Load().Count == 0 && File.Exists(Path.Combine(paths.DataRoot, "lampa-profile.bin.recovery")), "damaged profile preserved for recovery");
+    Assert(profile.Load().GetValueOrDefault("history") == "fixture-watch-position-42" && profile.RecoveryMessage is not null
+        && File.Exists(Path.Combine(paths.DataRoot, "lampa-profile.bin.recovery")), "damaged profile restores last good backup and reports recovery");
+    await profile.SaveAsync(new() { ["history"] = "after-recovery" });
+    await File.WriteAllBytesAsync(Path.Combine(paths.DataRoot, "lampa-profile.bin"), [4, 5, 6]);
+    Assert(profile.Load().GetValueOrDefault("history") == "fixture-watch-position-42"
+        && (await File.ReadAllBytesAsync(Path.Combine(paths.DataRoot, "lampa-profile.bin.recovery"))).SequenceEqual(new byte[] { 1, 2, 3 }),
+        "repeated corruption preserves previous recovery evidence and the good backup");
+    var preferences = new DesktopPreferences { Volume = 37, AudioLanguage = "eng", PreviewEnabled = false, ShowAllSearchResults = true };
+    preferences.Save(paths.SettingsFile);
+    var loadedPreferences = DesktopPreferences.Load(paths.SettingsFile);
+    Assert(loadedPreferences.Volume == 37 && loadedPreferences.AudioLanguage == "eng" && !loadedPreferences.PreviewEnabled && loadedPreferences.ShowAllSearchResults, "native player preferences survive a new store instance");
+    gateway.ShowAllSearchResults = true;
+    using (var relaxed = JsonDocument.Parse(await client.GetStringAsync(new Uri(gateway.Origin, "jackett/api/v2.0/indexers/all/results?Query=fixture"))))
+        Assert(relaxed.RootElement.GetProperty("Results").GetArrayLength() == 3, "show hidden results restores uncertain titles and zero-seed results while still excluding games");
+    Assert((await client.GetAsync(new Uri(gateway.Origin, "jackett/api/v2.0/indexers/all/results?oversized=true"))).StatusCode == HttpStatusCode.BadGateway,
+        "oversized chunked search response is rejected while streaming");
     await backend.StopAsync();
     var unavailable = await client.GetAsync(new Uri(gateway.Origin, "torrserver/echo"));
     Assert(unavailable.StatusCode == HttpStatusCode.BadGateway, "backend outage yields controlled error");

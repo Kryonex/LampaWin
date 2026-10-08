@@ -264,12 +264,33 @@ internal sealed class SmokeApp(string[] args) : Application
             await Task.Delay(300);
             Check(!Element<Grid>("PlayerPage").IsVisible && Element<Grid>("BrowserPage").IsVisible, "natural completion returns to episode selection page");
             Check(!bottom.IsVisible && !foregroundWindow.IsVisible, "natural completion hides actual VLC foreground window and controls");
+            var offerSession = Guid.NewGuid().ToString();
+            var offeredEnd = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            _window.PlaybackClosed += sessionId => { if (sessionId == offerSession) offeredEnd.TrySetResult(); };
+            _window.Play(new MediaRequest(FixtureUri, "Серия с продолжением", 0, offerSession));
+            _window.SetNextEpisode(offerSession, "Серия 2");
+            await Task.Delay(700);
+            actualPlayer.SeekTo(.95);
+            await offeredEnd.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            await Task.Delay(100);
+            Check(Element<Border>("NextEpisodePanel").IsVisible && Element<TextBlock>("NextEpisodeText").Text.Contains("Серия 2"), "next episode offer is visible in the actual VLC foreground");
+            string? requestedEpisode = null;
+            _window.NextEpisodeRequested += sessionId => requestedEpisode = sessionId;
+            Click("NextEpisodeButton");
+            Check(requestedEpisode == offerSession && !Element<Border>("NextEpisodePanel").IsVisible, "next button sends exactly the completed session and dismisses offer");
+            actualPlayer.PreviewEnabled = false;
+            Check(await actualPlayer.CapturePreviewAsync(.5, CancellationToken.None) is null, "disabled preview opens no background decoder");
+            _window.PrepareClose();
             File.WriteAllText(report, JsonSerializer.Serialize(new { success = true, checks = _checks }, new JsonSerializerOptions { WriteIndented = true }));
             _window.Close(); Shutdown(0);
         }
         catch (Exception ex)
         {
-            File.WriteAllText(report, JsonSerializer.Serialize(new { success = false, failure = ex.ToString(), checks = _checks }, new JsonSerializerOptions { WriteIndented = true }));
+            File.WriteAllText(report, JsonSerializer.Serialize(new { success = false, failure = ex.ToString(), checks = _checks,
+                audioChoices = _window is null ? null : Element<ComboBox>("AudioTracks").Items.Cast<object>().Select(x => x.ToString()).ToArray(),
+                settingsBounds = _window is null ? null : new[] { Element<Border>("PlayerSettingsPanel").ActualWidth, Element<Border>("PlayerSettingsPanel").ActualHeight },
+                overlayBounds = _window is null ? null : new[] { Element<Grid>("PlayerOverlay").ActualWidth, Element<Grid>("PlayerOverlay").ActualHeight }
+            }, new JsonSerializerOptions { WriteIndented = true }));
             _window?.Close(); Shutdown(1);
         }
     }

@@ -7,6 +7,7 @@
     let profileTimer;
     let installed = false;
     let installing = false;
+    let playlist = [];
     const send = (type, payload) => window.chrome.webview.postMessage({ version: 1, type, payload });
     function saveProfile() {
         const state = {};
@@ -20,8 +21,10 @@
     function saveProgress(progress) {
         if (!current || progress.sessionId !== current.id) return;
         const timeline = current.data.timeline;
+        if (Number.isFinite(progress.timeSeconds)) current.timeSeconds = Math.max(0, progress.timeSeconds);
         if (timeline && typeof timeline.handler === 'function' && Number.isFinite(progress.durationSeconds) && progress.durationSeconds > 0) {
             const time = Math.max(0, Math.min(progress.timeSeconds, progress.durationSeconds));
+            current.timeSeconds = time;
             const percent = progress.state === 'ended' ? 100 : Math.round(time / progress.durationSeconds * 100);
             timeline.handler(percent, time, progress.durationSeconds);
         }
@@ -42,8 +45,22 @@
         if (Lampa.Torserver && Lampa.Torserver.toPlayUrl) url = Lampa.Torserver.toPlayUrl(url);
         const id = crypto.randomUUID();
         current = { id, data };
+        playlist = Array.isArray(data.playlist) ? data.playlist : [];
         send('play', { sessionId: id, url, title: data.title || 'Просмотр',
-            startSeconds: Math.max(0, Number(data.timeline && data.timeline.time) || 0) });
+            startSeconds: Math.max(0, Number(data.timeline && data.timeline.time) || 0), torrentHash: data.torrent_hash || null });
+        publishNext();
+    }
+    function nextItem() {
+        if (!current) return null;
+        const canonical = item => Lampa.Torserver && Lampa.Torserver.toPlayUrl ? Lampa.Torserver.toPlayUrl(chooseUrl(item)) : chooseUrl(item);
+        const url = canonical(current.data);
+        const position = playlist.findIndex(item => item === current.data || canonical(item) === url);
+        return position >= 0 && position + 1 < playlist.length ? playlist[position + 1] : null;
+    }
+    function publishNext() {
+        if (!current) return;
+        const next = nextItem();
+        send('playlist', { sessionId: current.id, nextTitle: next ? next.title || 'Следующая серия' : null });
     }
     window.chrome.webview.addEventListener('message', function (event) {
         const message = event.data;
@@ -51,9 +68,18 @@
         if (message.type === 'progress') saveProgress(message.payload);
         if (message.type === 'closed' && current && message.payload.sessionId === current.id) {
             if (message.payload.progress) saveProgress(message.payload.progress);
-            current = null;
+            if (!(message.payload.ended && nextItem())) current = null;
             scheduleSave();
         }
+        if (message.type === 'nextEpisode' && current && message.payload.sessionId === current.id) {
+            const next = nextItem();
+            if (next) { const queue = playlist; play(Object.assign({}, next, { playlist: queue })); }
+        }
+        if (message.type === 'retryPlayback' && current && message.payload.sessionId === current.id) {
+            const timeline = Object.assign({}, current.data.timeline || {}, { time: current.timeSeconds ?? current.data.timeline?.time ?? 0 });
+            play(Object.assign({}, current.data, { timeline, playlist }));
+        }
+        if (message.type === 'dismissEpisode') { if (current && message.payload.sessionId === current.id) current = null; }
         if (message.type === 'flushProfile') saveProfile();
     });
     async function install() {
@@ -94,6 +120,13 @@
                 event.abort();
                 play(event.data);
             });
+            if (typeof Lampa.Player.playlist === 'function') {
+                const originalPlaylist = Lampa.Player.playlist;
+                Lampa.Player.playlist = function (items) {
+                    if (Array.isArray(items)) { playlist = items; publishNext(); }
+                    return originalPlaylist.apply(this, arguments);
+                };
+            }
             if (Lampa.Storage.listener) Lampa.Storage.listener.follow('change', scheduleSave);
             // Save direct caches and history as well, which do not always emit Storage.change.
             setInterval(scheduleSave, 10000);

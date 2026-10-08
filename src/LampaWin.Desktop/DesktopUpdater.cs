@@ -18,11 +18,25 @@ internal static class DesktopUpdater
     private const string InstallerName = "LampaWin-Setup-win-x64.exe";
     private const string RegistryPath = @"Software\LampaWin";
     private const string LegacyUninstallPath = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\{C7A5C33F-3531-44A0-AB47-622913A015D9}_is1";
+    private static readonly SemaphoreSlim CheckGate = new(1, 1);
+    private static string UpdateRoot => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LampaWin", "Updates");
+    private static string UpdatePreferencePath => Path.Combine(UpdateRoot, "preferences.json");
+    private static string ExpectedPublisher => typeof(DesktopUpdater).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyMetadataAttribute), false)
+        .Cast<System.Reflection.AssemblyMetadataAttribute>().FirstOrDefault(x => x.Key == "UpdatePublisher")?.Value ?? "";
 
-    public static async Task<bool> CheckAndOfferAsync(CancellationToken cancellationToken = default)
+    public static async Task<bool> CheckAndOfferAsync(CancellationToken cancellationToken = default, bool manual = false)
     {
+        if (!await CheckGate.WaitAsync(0, cancellationToken)) return false;
+        var installing = false;
+        try
+        {
         var installPath = GetRegisteredInstallPath();
-        if (installPath is null || !SamePath(installPath, AppContext.BaseDirectory)) return false;
+        if (installPath is null || !SamePath(installPath, AppContext.BaseDirectory))
+        {
+            if (manual) MessageBox.Show(Application.Current.MainWindow, "Портативная копия обновляется вручную. Новая версия доступна в разделе Releases проекта.", "Обновления LampaWin");
+            return false;
+        }
+        ShowPreviousResult();
 
         try
         {
@@ -35,24 +49,34 @@ internal static class DesktopUpdater
             var root = release.RootElement;
             if (!root.TryGetProperty("tag_name", out var tagProperty) ||
                 !TryReleaseVersion(tagProperty.GetString(), out var latest) ||
-                latest <= CurrentVersion()) return false;
+                latest <= CurrentVersion())
+            { if (manual) MessageBox.Show(Application.Current.MainWindow, "Установлена актуальная версия.", "Обновления LampaWin"); return false; }
+            var preference = LampaWin.Core.DesktopPreferences.Load(UpdatePreferencePath);
+            if (!manual && preference.DeferredUpdateVersion == latest.ToString() && preference.DeferredUpdateUntil > DateTimeOffset.UtcNow) return false;
 
             var assets = root.GetProperty("assets").EnumerateArray().ToArray();
             var installerUrl = GetAssetUrl(assets, InstallerName);
             var checksumsUrl = GetAssetUrl(assets, "SHA256SUMS.txt");
-            if (installerUrl is null || checksumsUrl is null) return false;
+            var signatureUrl = GetAssetUrl(assets, "SHA256SUMS.txt.p7s");
+            if (ExpectedPublisher.Length > 0 && signatureUrl is null) throw new CryptographicException("В релизе отсутствует подпись списка контрольных сумм.");
+            if (installerUrl is null || checksumsUrl is null) throw new InvalidDataException("В релизе отсутствует установщик или контрольные суммы.");
+            var notes = root.TryGetProperty("body", out var body) ? body.GetString() ?? "" : "";
+            if (notes.Length > 1800) notes = notes[..1800] + "…";
 
             var answer = System.Windows.MessageBox.Show(
-                $"Доступна новая версия LampaWin {latest}.\nУстановить её сейчас? Приложение будет перезапущено.",
+                Application.Current.MainWindow,
+                $"Доступна новая версия LampaWin {latest}.\n\n{notes}\n\nУстановить сейчас? Приложение будет перезапущено. «Нет» — напомнить через сутки.",
                 "Обновление LampaWin", System.Windows.MessageBoxButton.YesNo, System.Windows.MessageBoxImage.Information);
-            if (answer != System.Windows.MessageBoxResult.Yes) return false;
+            if (answer != System.Windows.MessageBoxResult.Yes)
+            { preference.DeferredUpdateVersion = latest.ToString(); preference.DeferredUpdateUntil = DateTimeOffset.UtcNow.AddDays(1); preference.Save(UpdatePreferencePath); return false; }
+            installing = true;
 
             var progress = new UpdateProgressWindow { Owner = Application.Current.MainWindow };
             progress.Show();
             try
             {
                 using var updateCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, progress.CancellationToken);
-                await InstallAsync(client, installerUrl, checksumsUrl, installPath, updateCancellation.Token, progress.Report);
+                await InstallAsync(client, installerUrl, checksumsUrl, signatureUrl, installPath, latest, updateCancellation.Token, progress.Report);
             }
             finally
             {
@@ -66,19 +90,31 @@ internal static class DesktopUpdater
         }
         catch (Exception ex)
         {
-            System.Windows.MessageBox.Show(
+            if (manual || installing) System.Windows.MessageBox.Show(
                 $"Не удалось установить обновление. LampaWin запустится в текущей версии.\n\n{ex.Message}",
                 "Обновление LampaWin", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Warning);
             return false;
         }
+        }
+        finally { CheckGate.Release(); }
     }
 
-    private static async Task InstallAsync(HttpClient client, string installerUrl, string checksumsUrl, string installPath, CancellationToken cancellationToken, Action<long, long?> reportProgress)
+    private static async Task InstallAsync(HttpClient client, string installerUrl, string checksumsUrl, string? signatureUrl, string installPath, Version version, CancellationToken cancellationToken, Action<long, long?> reportProgress)
     {
-        var updateDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LampaWin", "Updates");
+        var updateDirectory = Path.Combine(UpdateRoot, "run-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(updateDirectory);
         var installerPath = Path.Combine(updateDirectory, InstallerName);
-        var checksumText = await client.GetStringAsync(checksumsUrl, cancellationToken);
+        using var checksumTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        checksumTimeout.CancelAfter(TimeSpan.FromSeconds(20));
+        var checksumText = await client.GetStringAsync(checksumsUrl, checksumTimeout.Token);
+        if (checksumText.Length > 65536) throw new InvalidDataException("Список контрольных сумм слишком большой.");
+        await File.WriteAllTextAsync(Path.Combine(updateDirectory, "SHA256SUMS.txt"), checksumText, new System.Text.UTF8Encoding(false), checksumTimeout.Token);
+        if (ExpectedPublisher.Length > 0 && signatureUrl is not null)
+        {
+            var signature = await client.GetByteArrayAsync(signatureUrl, checksumTimeout.Token);
+            if (signature.Length > 65536) throw new CryptographicException("Подпись списка контрольных сумм слишком большая.");
+            await File.WriteAllBytesAsync(Path.Combine(updateDirectory, "SHA256SUMS.txt.p7s"), signature, checksumTimeout.Token);
+        }
         var expectedHash = ReadExpectedHash(checksumText, InstallerName);
         reportProgress(0, null);
         var partialPath = installerPath + ".part";
@@ -99,6 +135,7 @@ internal static class DesktopUpdater
                 {
                     await destination.WriteAsync(buffer.AsMemory(0, read), timeout.Token);
                     received += read;
+                    if (received > 2L * 1024 * 1024 * 1024) throw new InvalidDataException("Установщик превышает допустимый размер.");
                     reportProgress(received, total);
                 }
                 await destination.FlushAsync(timeout.Token);
@@ -137,8 +174,18 @@ internal static class DesktopUpdater
         process.ArgumentList.Add(installerPath);
         process.ArgumentList.Add("-InstallPath");
         process.ArgumentList.Add(installPath);
-        process.ArgumentList.Add("-AppPath");
-        process.ArgumentList.Add(Path.Combine(installPath, "LampaWin.exe"));
+        process.ArgumentList.Add("-ExpectedHash"); process.ArgumentList.Add(expectedHash);
+        process.ArgumentList.Add("-ExpectedVersion"); process.ArgumentList.Add(version.ToString());
+        if (ExpectedPublisher.Length > 0) { process.ArgumentList.Add("-ExpectedPublisher"); process.ArgumentList.Add(ExpectedPublisher); }
+        process.ArgumentList.Add("-ValidateOnly");
+        using (var validation = Process.Start(process) ?? throw new InvalidOperationException("Не удалось проверить установщик."))
+        {
+            try { await validation.WaitForExitAsync(cancellationToken).WaitAsync(TimeSpan.FromSeconds(30), cancellationToken); }
+            catch { if (!validation.HasExited) validation.Kill(entireProcessTree: true); throw; }
+            if (validation.ExitCode != 0) throw new InvalidOperationException("Обновление не прошло предварительную проверку. Проверьте свободное место для установки и резервной копии. Для подписанной сборки требуется установщик того же издателя.");
+        }
+        process.ArgumentList.RemoveAt(process.ArgumentList.Count - 1);
+        cancellationToken.ThrowIfCancellationRequested();
         using var updater = Process.Start(process) ?? throw new InvalidOperationException("Не удалось запустить установщик обновления.");
     }
 
@@ -178,7 +225,7 @@ internal static class DesktopUpdater
         foreach (var asset in assets)
             if (asset.TryGetProperty("name", out var assetName) && assetName.GetString() == name &&
                 asset.TryGetProperty("browser_download_url", out var url) && Uri.TryCreate(url.GetString(), UriKind.Absolute, out var uri) && uri.Scheme == Uri.UriSchemeHttps)
-                return uri.AbsoluteUri;
+                if (uri.Host.Equals("github.com", StringComparison.OrdinalIgnoreCase) && uri.AbsolutePath.StartsWith("/" + Repository + "/releases/download/", StringComparison.Ordinal)) return uri.AbsoluteUri;
         return null;
     }
 
@@ -192,22 +239,58 @@ internal static class DesktopUpdater
         throw new CryptographicException("В списке релиза отсутствует SHA-256 установщика.");
     }
 
-    private const string UpdaterScript = """
-param([int]$ProcessIdToWait, [string]$InstallerPath, [string]$InstallPath, [string]$AppPath)
-$ErrorActionPreference = 'Stop'
-try {
-    Wait-Process -Id $ProcessIdToWait -ErrorAction SilentlyContinue
-    $arguments = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CURRENTUSER', '/CLOSEAPPLICATIONS', ('/DIR="' + $InstallPath + '"'))
-    $setup = Start-Process -FilePath $InstallerPath -ArgumentList $arguments -Wait -PassThru
-    if ($setup.ExitCode -ne 0) { throw "Установщик завершился с кодом $($setup.ExitCode)." }
-    Remove-Item -LiteralPath $InstallerPath -Force -ErrorAction SilentlyContinue
-    Start-Process -FilePath $AppPath
-} catch {
-    Remove-Item -LiteralPath $InstallerPath -Force -ErrorAction SilentlyContinue
-    Start-Process -FilePath $AppPath -ErrorAction SilentlyContinue
-    exit 1
-}
-""";
+    private static string UpdaterScript
+    {
+        get
+        {
+            using var stream = typeof(DesktopUpdater).Assembly.GetManifestResourceStream("LampaWin.Desktop.UpdateInstaller.ps1")
+                ?? throw new InvalidOperationException("Отсутствует помощник обновления.");
+            using var reader = new StreamReader(stream); return reader.ReadToEnd();
+        }
+    }
+
+    private static void ShowPreviousResult()
+    {
+        var file = Path.Combine(UpdateRoot, "result.json");
+        if (!File.Exists(file)) return;
+        try
+        {
+            using var result = JsonDocument.Parse(File.ReadAllBytes(file));
+            var status = result.RootElement.GetProperty("status").GetString();
+            if (status is not ("failed" or "pending")) return;
+            var code = result.RootElement.GetProperty("code").GetString();
+            var message = code == "restored-previous-version" ? "Обновление не установилось. Предыдущая версия восстановлена; данные пользователя сохранены."
+                : "Предыдущее обновление не завершилось. Резервная копия сохранена в папке Updates. Повторите установку или используйте установщик из Releases.";
+            MessageBox.Show(Application.Current.MainWindow, message, "Результат обновления", MessageBoxButton.OK, MessageBoxImage.Warning);
+            File.Move(file, Path.Combine(UpdateRoot, "last-result.json"), true);
+        }
+        catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException) { }
+    }
+
+    public static async Task ConfirmSuccessfulStartupAsync()
+    {
+        var file = Path.Combine(UpdateRoot, "result.json");
+        try
+        {
+            if (!File.Exists(file)) return;
+            using var result = JsonDocument.Parse(await File.ReadAllBytesAsync(file));
+            var root = result.RootElement;
+            if (root.GetProperty("status").GetString() != "installed" || !TryReleaseVersion(root.GetProperty("version").GetString(), out var version) || version != CurrentVersion()) return;
+            var name = root.GetProperty("run").GetString();
+            if (name is null || !Regex.IsMatch(name, "^run-[a-f0-9]{32}$")) return;
+            var directory = Path.GetFullPath(Path.Combine(UpdateRoot, name));
+            if (!directory.StartsWith(Path.GetFullPath(UpdateRoot) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) return;
+            await Task.Run(() =>
+            {
+                if (!Directory.Exists(directory) || (File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0) return;
+                if (Directory.EnumerateFileSystemEntries(directory, "*", new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = 0 }).Any(path => (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)) return;
+                Directory.Delete(directory, true);
+            });
+            await File.WriteAllTextAsync(Path.Combine(UpdateRoot, "last-result.json"), JsonSerializer.Serialize(new { status = "success", version = version.ToString(), utc = DateTimeOffset.UtcNow }));
+            File.Delete(file);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or KeyNotFoundException) { }
+    }
 
     private sealed class UpdateProgressWindow : Window
     {

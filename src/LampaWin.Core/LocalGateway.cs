@@ -22,7 +22,7 @@ public sealed class LocalGateway : IAsyncDisposable
     private readonly HttpClient _client;
     private readonly HttpClient _publicClient;
     private readonly ConcurrentDictionary<string, (Uri Url, DateTimeOffset Expires)> _downloads = new();
-    private readonly string _loginToken = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
+    private string _loginToken = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
     private readonly string _session = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
     private readonly string _mediaToken = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
     private readonly string _cookie = "LampaWin_" + Convert.ToHexString(RandomNumberGenerator.GetBytes(8));
@@ -45,6 +45,13 @@ public sealed class LocalGateway : IAsyncDisposable
     }
     public Uri Origin { get; private set; } = null!;
     public Uri LoginUri => new(Origin, "bootstrap?token=" + _loginToken);
+    public Uri RenewLoginUri()
+    {
+        _loginToken = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
+        Interlocked.Exchange(ref _loginUsed, 0);
+        return LoginUri;
+    }
+    public bool ShowAllSearchResults { get; set; }
     public void UpdateRuntime(RuntimeSnapshot snapshot) => Volatile.Write(ref _runtime, snapshot);
 
     public async Task StartAsync(CancellationToken cancellationToken = default)
@@ -263,8 +270,18 @@ public sealed class LocalGateway : IAsyncDisposable
             context.Response.StatusCode = (int)response.StatusCode;
             if (rewriteResults && response.IsSuccessStatusCode)
             {
-                var body = await response.Content.ReadAsStringAsync(timeout.Token);
-                if (body.Length > 16 * 1024 * 1024) { context.Response.StatusCode = 502; return; }
+                const int maxSearchBytes = 16 * 1024 * 1024;
+                if (response.Content.Headers.ContentLength > maxSearchBytes) { context.Response.StatusCode = 502; return; }
+                using var stream = await response.Content.ReadAsStreamAsync(timeout.Token);
+                using var data = new MemoryStream();
+                var buffer = new byte[8192];
+                int count;
+                while ((count = await stream.ReadAsync(buffer, timeout.Token)) > 0)
+                {
+                    if (data.Length + count > maxSearchBytes) { context.Response.StatusCode = 502; return; }
+                    await data.WriteAsync(buffer.AsMemory(0, count), timeout.Token);
+                }
+                var body = Encoding.UTF8.GetString(data.GetBuffer(), 0, checked((int)data.Length));
                 var json = JsonNode.Parse(body);
                 if (json?["Results"] is JsonArray items)
                 {
@@ -273,7 +290,9 @@ public sealed class LocalGateway : IAsyncDisposable
                         ?? context.Request.Query["q"].FirstOrDefault();
                     var releaseYear = int.TryParse(context.Request.Query["lampawin_year"], out var year) && year is >= 1800 and <= 2100
                         ? (int?)year : null;
-                    TorrentResultPolicy.FilterAndRank(items, searchQuery, releaseYear, context.Request.Query["lampawin_kind"] == "tv");
+                    var countBefore = items.Count;
+                    TorrentResultPolicy.FilterAndRank(items, searchQuery, releaseYear, context.Request.Query["lampawin_kind"] == "tv", ShowAllSearchResults);
+                    if (json is JsonObject result) result["LampaWinFilteredCount"] = countBefore - items.Count;
                     for (var i = items.Count - 1; i >= 0; i--)
                     {
                         var item = items[i];

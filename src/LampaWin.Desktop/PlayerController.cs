@@ -23,8 +23,8 @@ public sealed class PlayerController : IDisposable
     private long? _pendingStartMilliseconds;
     private readonly ConcurrentDictionary<string, byte> _reportedLogCategories = new(StringComparer.Ordinal);
     private readonly SeekPreviewDecoder _previewDecoder = new();
-    private CancellationTokenSource? _previewWarmup;
-    private bool _previewPrimed;
+    public bool PreviewEnabled { get; set; } = true;
+    private string _outputDevice = string.Empty;
     private readonly AudioDeviceMonitor? _audioDevices;
     private readonly DispatcherTimer _audioRecoveryTimer;
     private int _volume = 80;
@@ -51,7 +51,7 @@ public sealed class PlayerController : IDisposable
         _player.Playing += (_, _) =>
         {
             _state = PlaybackState.Playing; ReportDiagnostic("native-playing", "Info"); Emit(_state);
-            _dispatcher.BeginInvoke(() => { ApplyPendingStart(); PrimePreviewDecoder(); });
+            _dispatcher.BeginInvoke(() => { ApplyPendingStart(); _player.Volume = _volume; if (_outputDevice.Length > 0) RestoreAudioOutput(); });
         };
         _player.Paused += (_, _) => { _state = PlaybackState.Paused; ReportDiagnostic("native-paused", "Info"); Emit(_state); };
         _player.Stopped += (_, _) => { _state = PlaybackState.Stopped; ReportDiagnostic("native-stopped", "Info"); Emit(_state); };
@@ -97,10 +97,9 @@ public sealed class PlayerController : IDisposable
         if (!request.Url.IsAbsoluteUri || request.Url.Scheme is not ("http" or "https" or "file"))
             throw new ArgumentException("Поддерживаются только HTTP, HTTPS и локальные файлы.", nameof(request));
         Stop();
+        _reportedLogCategories.Clear();
         _sessionId = request.SessionId;
         _currentUrl = request.Url;
-        _previewWarmup = new CancellationTokenSource();
-        _previewPrimed = false;
         _state = PlaybackState.Opening;
         _buffering = true;
         ReportDiagnostic("open-requested", "Info");
@@ -139,30 +138,23 @@ public sealed class PlayerController : IDisposable
     /// <summary>Captures a throttled, off-screen frame without moving the active player.</summary>
     public Task<BitmapSource?> CapturePreviewAsync(double fraction, CancellationToken cancellationToken)
     {
-        // Prioritize actual hover over speculative warmup.
-        _previewWarmup?.Cancel();
         var source = _currentUrl;
-        if (_disposed || source is null || !double.IsFinite(fraction)) return Task.FromResult<BitmapSource?>(null);
+        if (_disposed || !PreviewEnabled || _buffering && _player.State != VLCState.Paused || source is null || !double.IsFinite(fraction)) return Task.FromResult<BitmapSource?>(null);
         var target = (long)Math.Max(0, _player.Length * Math.Clamp(fraction, 0, .999));
         return _previewDecoder.CaptureAsync(source, target, cancellationToken);
     }
 
-    private void PrimePreviewDecoder()
+    public void SetOutputDevice(string device)
     {
-        var source = _currentUrl;
-        var warmup = _previewWarmup;
-        if (_disposed || source is null || warmup is null || warmup.IsCancellationRequested || _previewPrimed) return;
-        _previewPrimed = true;
-        // Only the already-playing position: no speculative downloads across the movie.
-        var target = Math.Max(0, _player.Time);
-        var token = warmup.Token;
-        _ = PrimeAsync();
-        async Task PrimeAsync()
-        {
-            try { await _previewDecoder.CaptureAsync(source, target, token).ConfigureAwait(false); }
-            catch (OperationCanceledException) { }
-        }
+        _outputDevice = device;
+        RestoreAudioOutput();
     }
+    public IReadOnlyList<(string Id, string Name)> OutputDevices => _player.AudioOutputDeviceEnum
+        .Select(device => (device.DeviceIdentifier, device.Description)).ToArray();
+    public void SetAudioDelay(double milliseconds) => _player.SetAudioDelay((long)(Math.Clamp(milliseconds, -10000, 10000) * 1000));
+    public void SetSubtitleDelay(double milliseconds) => _player.SetSpuDelay((long)(Math.Clamp(milliseconds, -10000, 10000) * 1000));
+    public void SetAspectRatio(string? ratio) => _player.AspectRatio = ratio;
+    public bool AddSubtitle(string path) => _player.AddSlave(MediaSlaveType.Subtitle, new Uri(System.IO.Path.GetFullPath(path)).AbsoluteUri, true);
 
     public void SetVolume(double value)
     {
@@ -186,12 +178,19 @@ public sealed class PlayerController : IDisposable
         // LibVLC 3 requires an empty device ID to reacquire the system default.
         // A null device ID is ignored. Switching the output module would require
         // restarting the movie; this restarts only the active audio output.
-        _player.SetOutputDevice(string.Empty, null);
+        _player.SetOutputDevice(_outputDevice, null);
         _player.Volume = _volume;
         _player.Mute = false; // UI mute is represented by volume=0, which stays zero.
         ReportDiagnostic("audio-output-rebound", "Info");
     }
     public void SetAudioTrack(int id) => _player.SetAudioTrack(id);
+    public int? FindTrack(string language, bool subtitle)
+    {
+        if (language.Length == 0) return null;
+        return _media?.Tracks.Where(track => track.TrackType == (subtitle ? TrackType.Text : TrackType.Audio)
+            && (track.Language == language || language == "rus" && track.Language == "ru" || language == "eng" && track.Language == "en"))
+            .Select(track => (int?)track.Id).FirstOrDefault();
+    }
     public void SetSubtitleTrack(int id) => _player.SetSpu(id);
     public IReadOnlyList<TrackDescription> AudioTracks => _player.AudioTrackDescription?.ToArray() ?? [];
     public IReadOnlyList<TrackDescription> SubtitleTracks => _player.SpuDescription?.ToArray() ?? [];
@@ -199,9 +198,6 @@ public sealed class PlayerController : IDisposable
     public void Stop()
     {
         _audioRecoveryTimer.Stop();
-        _previewWarmup?.Cancel();
-        _previewWarmup?.Dispose();
-        _previewWarmup = null;
         _previewDecoder.Cancel();
         var session = _sessionId;
         if (session is not null) EmitNow(PlaybackState.Stopped);

@@ -15,6 +15,7 @@ namespace LampaWin.Core.Runtime;
 public sealed class LocalRuntime : ILocalRuntime
 {
     private static readonly TimeSpan StartupTimeout = TimeSpan.FromSeconds(35);
+    private static readonly TimeSpan JackettStartupTimeout = TimeSpan.FromSeconds(90);
     private static readonly TimeSpan SourceSetupTimeout = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan ProbeInterval = TimeSpan.FromSeconds(4);
     private const long MaxLogBytes = 512 * 1024;
@@ -121,6 +122,19 @@ public sealed class LocalRuntime : ILocalRuntime
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             SetStatus(RuntimeState.Recovering, "Восстановление локальных компонентов…");
+            if (_snapshot is { } snapshot)
+            {
+                await StopMonitorAsync().ConfigureAwait(false);
+                try
+                {
+                    var health = await ReadHealthAsync(snapshot, cancellationToken).ConfigureAwait(false);
+                    if (!health.Torr) await RestartComponentAsync(true, cancellationToken).ConfigureAwait(false);
+                    if (!health.Jackett) await RestartComponentAsync(false, cancellationToken).ConfigureAwait(false);
+                }
+                finally { if (!_disposed && !cancellationToken.IsCancellationRequested) StartMonitor(); }
+                SetStatus(RuntimeState.Ready, "Локальные компоненты готовы.");
+                return _snapshot!;
+            }
             await StopCoreAsync().ConfigureAwait(false);
         }
         finally { _gate.Release(); }
@@ -214,7 +228,7 @@ public sealed class LocalRuntime : ILocalRuntime
 
     private async Task<string> WaitForJackettAsync(Uri baseUri, Process process, CancellationToken token)
     {
-        var until = DateTime.UtcNow + StartupTimeout;
+        var until = DateTime.UtcNow + JackettStartupTimeout;
         while (DateTime.UtcNow < until)
         {
             token.ThrowIfCancellationRequested();
@@ -433,9 +447,16 @@ public sealed class LocalRuntime : ILocalRuntime
 
     private async Task<bool> AreHealthyAsync(RuntimeSnapshot snapshot, CancellationToken token)
     {
-        return IsRunning(_torr) && IsRunning(_jackett)
-            && await ProbeAsync(new Uri(snapshot.TorrServerBaseUri, "echo"), snapshot.TorrServerUser, snapshot.TorrServerPassword, token).ConfigureAwait(false)
-            && await ProbeAsync(new Uri(snapshot.JackettBaseUri, "api/v2.0/server/config"), null, null, token).ConfigureAwait(false);
+        var health = await ReadHealthAsync(snapshot, token).ConfigureAwait(false);
+        return health.Torr && health.Jackett;
+    }
+
+    private async Task<(bool Torr, bool Jackett)> ReadHealthAsync(RuntimeSnapshot snapshot, CancellationToken token)
+    {
+        var torr = IsRunning(_torr) ? ProbeAsync(new Uri(snapshot.TorrServerBaseUri, "echo"), snapshot.TorrServerUser, snapshot.TorrServerPassword, token) : Task.FromResult(false);
+        var jackett = IsRunning(_jackett) ? ProbeAsync(new Uri(snapshot.JackettBaseUri, "api/v2.0/server/config"), null, null, token) : Task.FromResult(false);
+        await Task.WhenAll(torr, jackett).ConfigureAwait(false);
+        return (await torr, await jackett);
     }
 
     private async Task<bool> ProbeAsync(Uri uri, string? user, string? password, CancellationToken token)
@@ -459,71 +480,89 @@ public sealed class LocalRuntime : ILocalRuntime
     private async Task MonitorAsync(CancellationToken token)
     {
         var backoff = new[] { 1, 2, 4 };
-        var failureCount = 0;
-        var consecutiveHealthyTicks = 0;
+        var misses = new int[2];
+        var attempts = new int[2];
+        var healthyTicks = new int[2];
         while (!token.IsCancellationRequested)
         {
-            try { await Task.Delay(ProbeInterval, token).ConfigureAwait(false); }
-            catch (OperationCanceledException) { break; }
-            BoundJackettLog();
-            var snapshot = _snapshot;
-            if (snapshot is null) return;
-            if (await AreHealthyAsync(snapshot, token).ConfigureAwait(false))
-            {
-                if (++consecutiveHealthyTicks >= 15) failureCount = 0;
-                continue;
-            }
-            consecutiveHealthyTicks = 0;
-            await _gate.WaitAsync(token).ConfigureAwait(false);
             try
             {
-                if (_snapshot is null || token.IsCancellationRequested) return;
-                SetStatus(RuntimeState.Degraded, "Локальный компонент временно недоступен.");
-                if (failureCount >= backoff.Length)
+                await Task.Delay(ProbeInterval, token).ConfigureAwait(false);
+                BoundJackettLog();
+                if (_snapshot is not { } snapshot) return;
+                var health = await ReadHealthAsync(snapshot, token).ConfigureAwait(false);
+                for (var component = 0; component < 2; component++)
                 {
-                    SetStatus(RuntimeState.Failed, "Не удалось автоматически восстановить локальные компоненты.");
-                    return;
-                }
-                await Task.Delay(TimeSpan.FromSeconds(backoff[failureCount++]), token).ConfigureAwait(false);
-                SetStatus(RuntimeState.Recovering, "Повторный запуск локального компонента…");
-                try
-                {
-                    await RestartChildrenAsync(token).ConfigureAwait(false);
-                    SetStatus(RuntimeState.Ready, "Локальные компоненты восстановлены.");
-                }
-                catch
-                {
-                    await StopChildrenAsync().ConfigureAwait(false);
+                    var healthy = component == 0 ? health.Torr : health.Jackett;
+                    if (healthy)
+                    {
+                        misses[component] = 0;
+                        if (++healthyTicks[component] >= 15) attempts[component] = 0;
+                        continue;
+                    }
+                    healthyTicks[component] = 0;
+                    if (++misses[component] < 3) continue;
+                    var name = component == 0 ? "TorrServer" : "Jackett";
+                    if (attempts[component] >= backoff.Length)
+                    {
+                        SetStatus(RuntimeState.Failed, name + " недоступен. Нажмите «Восстановить». Другой сервис продолжает работать.");
+                        continue;
+                    }
+                    await _gate.WaitAsync(token).ConfigureAwait(false);
+                    try
+                    {
+                        if (_snapshot is null) return;
+                        SetStatus(RuntimeState.Recovering, "Восстанавливаем " + name + "…");
+                        await Task.Delay(TimeSpan.FromSeconds(backoff[attempts[component]++]), token).ConfigureAwait(false);
+                        await RestartComponentAsync(component == 0, token).ConfigureAwait(false);
+                        misses[component] = 0;
+                        SetStatus(RuntimeState.Ready, name + " восстановлен.");
+                    }
+                    catch (Exception ex) when (!token.IsCancellationRequested)
+                    { SetStatus(RuntimeState.Degraded, name + " временно недоступен (" + ex.GetType().Name + ")."); }
+                    finally { _gate.Release(); }
                 }
             }
             catch (OperationCanceledException) { return; }
-            finally { _gate.Release(); }
         }
     }
 
-    private async Task RestartChildrenAsync(CancellationToken token)
+    private async Task RestartComponentAsync(bool torr, CancellationToken token)
     {
-        await StopChildrenAsync().ConfigureAwait(false);
         if (_snapshot is null) return;
         var snapshot = _snapshot;
-        var credentials = (snapshot.TorrServerUser, snapshot.TorrServerPassword);
-        _torr = StartChild(_paths.TorrServerExecutable, _paths.ComponentsRoot,
-            ["--ip", "127.0.0.1", "--port", _torrPort.ToString(), "--path", _paths.TorrServerData,
-             "--torrentsdir", Path.Combine(_paths.TorrServerData, "torrents"), "--httpauth"], "torrserver.stdout.log");
-        _torrJob = ChildJob.TryAssign(_torr);
-        await PrepareJackettConfigAsync(token).ConfigureAwait(false);
-        _jackett = StartChild(_paths.JackettExecutable, Path.GetDirectoryName(_paths.JackettExecutable)!,
-            ["--ListenPrivate", "--NoUpdates", "--DataFolder", _paths.JackettData], "jackett.stdout.log");
-        _jackettJob = ChildJob.TryAssign(_jackett);
-        await WaitForTorrServerAsync(snapshot.TorrServerBaseUri, credentials.Item1, credentials.Item2, _torr, token).ConfigureAwait(false);
-        var key = await WaitForJackettAsync(snapshot.JackettBaseUri, _jackett, token).ConfigureAwait(false);
-        if (!key.Equals(snapshot.JackettApiKey, StringComparison.Ordinal))
+        if (torr)
+        {
+            await StopOneAsync(_torr, _torrJob).ConfigureAwait(false);
+            _torr = null; _torrJob?.Dispose(); _torrJob = null;
+            _torr = StartChild(_paths.TorrServerExecutable, _paths.ComponentsRoot,
+                ["--ip", "127.0.0.1", "--port", _torrPort.ToString(), "--path", _paths.TorrServerData,
+                 "--torrentsdir", Path.Combine(_paths.TorrServerData, "torrents"), "--httpauth"], "torrserver.stdout.log");
+            _torrJob = ChildJob.TryAssign(_torr);
+            await WaitForTorrServerAsync(snapshot.TorrServerBaseUri, snapshot.TorrServerUser, snapshot.TorrServerPassword, _torr, token).ConfigureAwait(false);
+        }
+        else
+        {
+            await StopOneAsync(_jackett, _jackettJob).ConfigureAwait(false);
+            _jackett = null; _jackettJob?.Dispose(); _jackettJob = null;
+            await PrepareJackettConfigAsync(token).ConfigureAwait(false);
+            _jackett = StartChild(_paths.JackettExecutable, Path.GetDirectoryName(_paths.JackettExecutable)!,
+                ["--ListenPrivate", "--NoUpdates", "--DataFolder", _paths.JackettData], "jackett.stdout.log");
+            _jackettJob = ChildJob.TryAssign(_jackett);
+            var key = await WaitForJackettAsync(snapshot.JackettBaseUri, _jackett, token).ConfigureAwait(false);
             _snapshot = snapshot with { JackettApiKey = key };
+        }
     }
 
     private async Task StopCoreAsync()
     {
         _snapshot = null;
+        await StopMonitorAsync().ConfigureAwait(false);
+        await StopChildrenAsync().ConfigureAwait(false);
+    }
+
+    private async Task StopMonitorAsync()
+    {
         _monitorCancellation?.Cancel();
         if (_monitorTask is not null)
         {
@@ -532,7 +571,6 @@ public sealed class LocalRuntime : ILocalRuntime
         _monitorCancellation?.Dispose();
         _monitorCancellation = null;
         _monitorTask = null;
-        await StopChildrenAsync().ConfigureAwait(false);
     }
 
     private async Task StopChildrenAsync()

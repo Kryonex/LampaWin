@@ -18,15 +18,25 @@ public static class DesktopBootstrap
 {
     private static Session? _session;
     private static Mutex? _instance;
+    private static EventWaitHandle? _activation;
+    private static RegisteredWaitHandle? _activationWait;
     public static async Task RunAsync()
     {
         var arguments = Environment.GetCommandLineArgs();
+        if (arguments.Contains("--verify-package", StringComparer.Ordinal))
+        {
+            Application.Current.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            var result = await PackageValidation.RunAsync(ArgumentValue(arguments, "--fixture") ?? throw new ArgumentException("Fixture required."), ArgumentValue(arguments, "--report") ?? throw new ArgumentException("Report required."));
+            Application.Current.Shutdown(result); return;
+        }
         var smoke = arguments.Contains("--self-test", StringComparer.Ordinal);
         var user = WindowsIdentity.GetCurrent().User?.Value ?? Environment.UserName;
         _instance = new Mutex(true, "Local\\LampaWin-" + user + (smoke ? "-test-" + Environment.ProcessId : ""), out var created);
+        if (!smoke) _activation = new EventWaitHandle(false, EventResetMode.AutoReset, "Local\\LampaWin-activate-" + user);
         if (!created)
         {
-            MessageBox.Show("LampaWin уже запущен. Откройте существующее окно приложения.", "LampaWin");
+            _activation?.Set();
+            _activation?.Dispose(); _instance.Dispose();
             Application.Current.Shutdown();
             return;
         }
@@ -44,8 +54,13 @@ public static class DesktopBootstrap
             window.Left = -30000; window.Top = -30000;
         }
         _session = new Session(paths, window);
+        if (_activation is not null) _activationWait = ThreadPool.RegisterWaitForSingleObject(_activation, (_, _) => window.Dispatcher.BeginInvoke(() =>
+        {
+            if (window.WindowState == WindowState.Minimized) window.WindowState = WindowState.Normal;
+            window.Show(); window.Activate();
+        }), null, Timeout.Infinite, false);
         window.Show();
-        if (!smoke && await DesktopUpdater.CheckAndOfferAsync())
+        if (!smoke && await DesktopUpdater.CheckAndOfferAsync(_session.LifetimeToken))
         {
             window.Close();
             return;
@@ -77,6 +92,9 @@ public static class DesktopBootstrap
         private LocalGateway? _gateway;
         private bool _closing;
         private bool _browserConfigured;
+        private bool _browserBroken;
+        private string? _profileNotice;
+        private CancellationTokenSource? _streamStatsCancellation;
         private string? _documentScriptId;
         private PlaybackProgress? _lastProgress;
         private readonly List<string> _errors = [];
@@ -84,11 +102,31 @@ public static class DesktopBootstrap
         private readonly List<string> _testStates = [];
         private readonly List<PlaybackDiagnostic> _testDiagnostics = [];
         private bool _testFailed;
+        public CancellationToken LifetimeToken => _lifetime.Token;
         public Session(AppPaths paths, MainWindow window)
         {
             _paths = paths; _window = window;
+            _window.LifetimeToken = _lifetime.Token;
             _runtime = new LocalRuntime(paths);
             _profile = new ProfileStore(paths);
+            if (!Environment.GetCommandLineArgs().Contains("--self-test", StringComparer.Ordinal)) _window.InitializePreferences(paths);
+            _window.SearchModeChanged += include => { if (_gateway is not null) _gateway.ShowAllSearchResults = include; };
+            _window.NextEpisodeRequested += session => Send("nextEpisode", new { sessionId = session });
+            _window.EpisodeDismissed += session => Send("dismissEpisode", new { sessionId = session });
+            _window.RetryPlaybackRequested += session => Send("retryPlayback", new { sessionId = session });
+            _window.DiagnosticsProvider = () => new
+            {
+                generatedUtc = DateTimeOffset.UtcNow,
+                version = typeof(MainWindow).Assembly.GetName().Version?.ToString(),
+                windows = Environment.OSVersion.Version.ToString(),
+                architecture = System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture.ToString(),
+                webViewVersion = _window.Browser.CoreWebView2?.Environment.BrowserVersionString,
+                localServicesStarted = _runtime.Snapshot is not null,
+                indexers = _runtime.Snapshot?.Indexers,
+                playback = _lastProgress is null ? null : new { _lastProgress.State, _lastProgress.IsBuffering },
+                diagnostics = _testDiagnostics.ToArray(),
+                errors = _errors.Select(entry => entry.Split('\n')[0].Split(' ').TakeLast(2).ToArray()).ToArray()
+            };
             _window.SetLogsPath(paths.LogsDirectory);
             _window.RecoverRequested += async () => await InitializeAsync(recover: true);
             _window.PlaybackChanged += OnProgress;
@@ -123,10 +161,16 @@ public static class DesktopBootstrap
                     await _gateway.StartAsync(_lifetime.Token);
                 }
                 else _gateway.UpdateRuntime(snapshot);
+                _gateway.ShowAllSearchResults = _window.ShowAllSearchResults;
                 _window.SetStatus("Открываем Lampa…", true);
+                if (_browserBroken)
+                {
+                    _window.RecreateBrowser();
+                    _browserConfigured = false; _documentScriptId = null; _browserBroken = false;
+                }
                 if (!_browserConfigured)
                 {
-                    await _window.InitializeBrowserAsync(_paths.BrowserData, _gateway.LoginUri, async browser =>
+                    await _window.InitializeBrowserAsync(_paths.BrowserData, _gateway.RenewLoginUri(), async browser =>
                     {
                         browser.Settings.AreHostObjectsAllowed = false;
                         browser.Settings.AreDevToolsEnabled = false;
@@ -145,18 +189,20 @@ public static class DesktopBootstrap
                         {
                             if (_gateway is null || !BridgeProtocol.IsTrustedSource(request.Uri, _gateway.Origin)) request.Cancel = true;
                         };
-                        browser.ProcessFailed += (_, _) => _window.SetStatus("Интерфейс остановился. Нажмите «Восстановить».", false, true);
+                        browser.ProcessFailed += (_, _) => { _browserBroken = true; _window.SetStatus("Интерфейс остановился. Нажмите «Восстановить».", false, true); };
                         browser.NavigationCompleted += (_, result) =>
                         {
                             if (!result.IsSuccess) _window.SetStatus("Не удалось открыть интерфейс. Нажмите «Восстановить».", false, true);
                         };
-                        _documentScriptId = await browser.AddScriptToExecuteOnDocumentCreatedAsync(BridgeProtocol.DocumentScript(_gateway.Origin, _profile.Load()));
+                        var savedProfile = _profile.Load(); _profileNotice = _profile.RecoveryMessage;
+                        _documentScriptId = await browser.AddScriptToExecuteOnDocumentCreatedAsync(BridgeProtocol.DocumentScript(_gateway.Origin, savedProfile));
                     });
                     _browserConfigured = true;
                 }
                 else
                 {
-                    await SaveCurrentProfileAsync();
+                    try { await SaveCurrentProfileAsync().WaitAsync(TimeSpan.FromSeconds(3)); }
+                    catch (Exception ex) { RecordError("profile-recover", ex); }
                     if (_documentScriptId is not null) _window.Browser.CoreWebView2.RemoveScriptToExecuteOnDocumentCreated(_documentScriptId);
                     _documentScriptId = await _window.Browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(BridgeProtocol.DocumentScript(_gateway.Origin, _profile.Load()));
                     _window.Browser.CoreWebView2.Navigate(_gateway.Origin.AbsoluteUri);
@@ -186,8 +232,9 @@ public static class DesktopBootstrap
                 {
                     case "ready":
                         _window.MarkBrowserReady();
-                        _window.SetStatus("Готово к просмотру", false);
+                        _window.SetStatus(_profileNotice ?? "Готово к просмотру", false);
                         _ready.TrySetResult();
+                        if (!Environment.GetCommandLineArgs().Contains("--self-test", StringComparer.Ordinal)) _ = DesktopUpdater.ConfirmSuccessfulStartupAsync();
                         break;
                     case "profile":
                         var state = payload.Deserialize<Dictionary<string, string>>();
@@ -198,6 +245,8 @@ public static class DesktopBootstrap
                         var id = payload.GetProperty("sessionId").GetString() ?? "";
                         var title = payload.GetProperty("title").GetString() ?? "Просмотр";
                         var start = payload.GetProperty("startSeconds").GetDouble();
+                        var hash = payload.TryGetProperty("torrentHash", out var hashProperty) ? hashProperty.GetString() : null;
+                        if (hash is not null && !System.Text.RegularExpressions.Regex.IsMatch(hash, "^[a-fA-F0-9]{40}$")) hash = null;
                         if (!Guid.TryParse(id, out _) || title.Length > 512 || !double.IsFinite(start) || start < 0 ||
                             !_gateway.TryCreateMediaUri(url, out var media))
                         {
@@ -205,7 +254,13 @@ public static class DesktopBootstrap
                             break;
                         }
                         if (_testStates.Count < 100) _testStates.Add("native-play-request");
-                        _window.Play(new MediaRequest(media, title, Math.Min(start, 864000), id));
+                        _window.Play(new MediaRequest(media, title, Math.Min(start, 864000), id, hash));
+                        StartStreamStatistics(id, hash);
+                        break;
+                    case "playlist":
+                        var playlistSession = payload.GetProperty("sessionId").GetString() ?? "";
+                        var nextTitle = payload.TryGetProperty("nextTitle", out var nextProperty) ? nextProperty.GetString() : null;
+                        if (nextTitle?.Length <= 512 || nextTitle is null) _window.SetNextEpisode(playlistSession, nextTitle);
                         break;
                     case "error":
                         if (_errors.Count < 100) _errors.Add("bridge-error");
@@ -233,6 +288,7 @@ public static class DesktopBootstrap
         };
         private void OnPlaybackClosed(string session)
         {
+            _streamStatsCancellation?.Cancel();
             var last = _lastProgress?.SessionId == session ? _lastProgress : null;
             Send("closed", new { sessionId = session, ended = last?.State == PlaybackState.Ended,
                 progress = last is null ? null : ProgressPayload(last) });
@@ -255,11 +311,12 @@ public static class DesktopBootstrap
         {
             if (_closing) return;
             args.Cancel = true;
+            _window.PrepareClose();
             _window.StopPlayback();
             _closing = true;
             _window.IsEnabled = false;
             _lifetime.Cancel();
-            try { await SaveCurrentProfileAsync(); } catch (Exception ex) { RecordError("profile-close", ex); }
+            try { if (!_browserBroken) await SaveCurrentProfileAsync().WaitAsync(TimeSpan.FromSeconds(3)); } catch (Exception ex) { RecordError("profile-close", ex); }
             await _initializeGate.WaitAsync();
             try
             {
@@ -278,9 +335,49 @@ public static class DesktopBootstrap
                     _window.Close();
                     if (_testFailed) Application.Current.Shutdown(1);
                     _instance?.ReleaseMutex(); _instance?.Dispose(); _instance = null;
+                    _activationWait?.Unregister(null); _activation?.Dispose(); _activation = null;
                 });
             }
         }
+        private void StartStreamStatistics(string session, string? hash)
+        {
+            _streamStatsCancellation?.Cancel();
+            _streamStatsCancellation?.Dispose();
+            _streamStatsCancellation = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
+            if (hash is null) return;
+            var token = _streamStatsCancellation.Token;
+            _ = PollAsync();
+            async Task PollAsync()
+            {
+                using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
+                while (!token.IsCancellationRequested)
+                {
+                    try
+                    {
+                        if (_runtime.Snapshot is { } snapshot)
+                        {
+                            using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(snapshot.TorrServerBaseUri, "torrents"));
+                            request.Headers.Authorization = new AuthenticationHeaderValue("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes(snapshot.TorrServerUser + ":" + snapshot.TorrServerPassword)));
+                            request.Content = JsonContent.Create(new { action = "get", hash });
+                            using var response = await client.SendAsync(request, token);
+                            response.EnsureSuccessStatusCode();
+                            using var json = JsonDocument.Parse(await response.Content.ReadAsStreamAsync(token));
+                            var item = json.RootElement;
+                            double Number(string name) => item.TryGetProperty(name, out var value) && value.TryGetDouble(out var number) && double.IsFinite(number) ? Math.Max(0, number) : 0;
+                            var peers = Number("active_peers");
+                            var speed = Number("download_speed");
+                            var detail = $"{(peers <= 0 ? "Ожидаем метаданные или подключение пиров" : "Получаем данные раздачи")}\nСкорость: {speed / 1048576:F2} МБ/с · Активных пиров: {peers:F0}\nЗагружено: {Number("loaded_size") / 1048576:F1} МБ · Буфер: {Number("preloaded_bytes") / 1048576:F1} МБ";
+                            _window.SetStreamDetail(session, detail);
+                        }
+                    }
+                    catch (Exception ex) when (ex is HttpRequestException or JsonException or OperationCanceledException)
+                    { if (token.IsCancellationRequested) return; }
+                    try { await Task.Delay(TimeSpan.FromSeconds(2), token); }
+                    catch (OperationCanceledException) { return; }
+                }
+            }
+        }
+
         private void RecordError(string category, Exception error)
         {
             var entry = DateTimeOffset.UtcNow.ToString("O") + " " + category + " " + error.GetType().Name + Environment.NewLine + error.StackTrace;

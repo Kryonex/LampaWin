@@ -1,11 +1,22 @@
 [CmdletBinding()]
-param([switch]$SkipInstaller,[switch]$SkipJackettPublish,[string]$CandidateName = '')
+param([switch]$SkipInstaller,[switch]$SkipJackettPublish,[string]$CandidateName = '',[string]$SigningThumbprint = $env:LAMPAWIN_SIGNING_THUMBPRINT,[string]$TimestampServer = $env:LAMPAWIN_TIMESTAMP_SERVER)
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 $localDotnet = Join-Path $root '.tools/dotnet/dotnet.exe'
 $dotnet = if (Test-Path $localDotnet) { $localDotnet } else { (Get-Command dotnet -ErrorAction Stop).Source }
 $dotnetRoot = Split-Path -Parent $dotnet
 $desktop = Join-Path $root 'src/LampaWin.Desktop/LampaWin.Desktop.csproj'
+$certificate = $null
+if ($SigningThumbprint) {
+    if ($SigningThumbprint -notmatch '^[A-Fa-f0-9]{40}$') { throw 'Invalid signing certificate thumbprint' }
+    $certificate = Get-Item -LiteralPath ("Cert:\CurrentUser\My\" + $SigningThumbprint) -ErrorAction Stop
+    if (!$certificate.HasPrivateKey) { throw 'Signing certificate has no private key' }
+    if (!$TimestampServer -or $TimestampServer -notmatch '^https?://') { throw 'Signing requires a timestamp server URL' }
+}
+function Sign-ReleaseFile([string]$path) {
+    $signature = Set-AuthenticodeSignature -LiteralPath $path -Certificate $certificate -HashAlgorithm SHA256 -TimestampServer $TimestampServer
+    if ($signature.Status -ne 'Valid') { throw "Release signature validation failed: $path" }
+}
 $jackettSource = Join-Path $root '.cache/jackett-source/src/Jackett.Server/Jackett.Server.csproj'
 $artifactsBase = (Resolve-Path (Join-Path $root 'artifacts')).Path
 if ($CandidateName -and $CandidateName -notmatch '^[a-zA-Z0-9][a-zA-Z0-9-]{0,63}$') { throw 'CandidateName must be a simple directory name.' }
@@ -30,8 +41,13 @@ $publishFull = [IO.Path]::GetFullPath($publish)
 if (!$publishFull.StartsWith($artifactsRoot + [IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)) { throw "Refusing to remove publish output outside artifacts: $publishFull" }
 if (Test-Path -LiteralPath $publishFull) { Remove-Item -LiteralPath $publishFull -Recurse -Force }
 New-Item -ItemType Directory -Force $publish | Out-Null
-& $dotnet publish $desktop -c Release -r win-x64 --self-contained true --source https://api.nuget.org/v3/index.json -o $publish
+$publishArguments = @('publish', $desktop, '-c', 'Release', '-r', 'win-x64', '--self-contained', 'true', '--source', 'https://api.nuget.org/v3/index.json', '-o', $publish)
+if ($certificate) { $publishArguments += ('-p:UpdatePublisher=' + $certificate.Subject.Replace('%','%25').Replace(';','%3B').Replace(',','%2C')) }
+& $dotnet @publishArguments
 if ($LASTEXITCODE) { throw 'LampaWin publish failed' }
+if ($certificate) {
+    foreach ($name in @('LampaWin.exe','LampaWin.dll','LampaWin.Core.dll')) { Sign-ReleaseFile (Join-Path $publish $name) }
+}
 
 # The desktop publish is win-x64; discard only the unused native VLC RIDs
 # copied by the NuGet package so an x64 installer cannot accidentally load them.
@@ -54,7 +70,7 @@ $jackettTargetDir = Join-Path $publishComponents 'jackett'
 New-Item -ItemType Directory -Force $jackettTargetDir | Out-Null
 Get-ChildItem -LiteralPath $jackettSourceDir | Where-Object Name -ne 'Jackett' | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $jackettTargetDir -Recurse -Force }
 Copy-Item -LiteralPath (Join-Path $root 'THIRD-PARTY-NOTICES.md') -Destination (Join-Path $publish 'THIRD-PARTY-NOTICES.md') -Force
-foreach ($rootDocument in @('README.md','LICENSE','VALIDATION.md','FOOD-ORDERING.md','AUDIO-RECOVERY.md')) {
+foreach ($rootDocument in @('README.md','LICENSE','VALIDATION.md','AUDIT-FIXES.md','FOOD-ORDERING.md','AUDIO-RECOVERY.md')) {
     $documentPath = Join-Path $root $rootDocument
     if (!(Test-Path -LiteralPath $documentPath)) { throw "Required release document is missing: $rootDocument" }
     Copy-Item -LiteralPath $documentPath -Destination (Join-Path $publish $rootDocument) -Force
@@ -105,7 +121,7 @@ $sourceStageFull = [IO.Path]::GetFullPath($sourceStage)
 if (!$sourceStageFull.StartsWith($artifactsRoot + [IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)) { throw "Refusing to create source staging outside artifacts: $sourceStageFull" }
 if (Test-Path -LiteralPath $sourceStageFull) { Remove-Item -LiteralPath $sourceStageFull -Recurse -Force }
 New-Item -ItemType Directory -Force $sourceStageFull | Out-Null
-foreach ($relative in @('src','tests','tools/packaging','tools/runtime','tools/testing','installer','config','licenses','releases','THIRD-PARTY-NOTICES.md','README.md','VALIDATION.md','FOOD-ORDERING.md','AUDIO-RECOVERY.md','LICENSE','global.json','Directory.Build.props','NuGet.Config','LampaWin.sln')) {
+foreach ($relative in @('src','tests','docs','tools/packaging','tools/runtime','tools/testing','installer','config','licenses','releases','THIRD-PARTY-NOTICES.md','README.md','VALIDATION.md','AUDIT-FIXES.md','FOOD-ORDERING.md','AUDIO-RECOVERY.md','LICENSE','global.json','Directory.Build.props','NuGet.Config','LampaWin.sln')) {
     $from = Join-Path $root $relative
     if (!(Test-Path -LiteralPath $from)) { continue }
     if ((Get-Item -LiteralPath $from).PSIsContainer) {
@@ -156,6 +172,7 @@ if (!$SkipInstaller) {
     if (!$releaseVersion) { $releaseVersion = $appVersion }
     & $iscc (Join-Path $root 'installer/LampaWin.iss') "/DPublishDir=$publish" "/DOutputDir=$artifactsRoot" "/DAppVersion=$releaseVersion" "/DAppFileVersion=$appVersion"
     if ($LASTEXITCODE) { throw 'Inno Setup compile failed' }
+    if ($certificate) { Sign-ReleaseFile (Join-Path $artifactsRoot 'LampaWin-Setup-win-x64.exe') }
 }
 $checksumFiles = @('LampaWin-win-x64-portable.zip')
 if (!$SkipInstaller) { $checksumFiles += 'LampaWin-Setup-win-x64.exe' }
@@ -164,4 +181,14 @@ $checksumLines = foreach ($name in $checksumFiles) {
     "$hash *$name"
 }
 Set-Content -LiteralPath (Join-Path $artifactsRoot 'SHA256SUMS.txt') -Value $checksumLines -Encoding ascii
+$manifestSignature = Join-Path $artifactsRoot 'SHA256SUMS.txt.p7s'
+if ($certificate) {
+    Add-Type -AssemblyName System.Security.Cryptography.Pkcs
+    $content = [Security.Cryptography.Pkcs.ContentInfo]::new([IO.File]::ReadAllBytes((Join-Path $artifactsRoot 'SHA256SUMS.txt')))
+    $cms = [Security.Cryptography.Pkcs.SignedCms]::new($content, $true)
+    $signer = [Security.Cryptography.Pkcs.CmsSigner]::new($certificate)
+    $signer.IncludeOption = [Security.Cryptography.X509Certificates.X509IncludeOption]::WholeChain
+    $cms.ComputeSignature($signer, $true)
+    [IO.File]::WriteAllBytes($manifestSignature, $cms.Encode())
+} elseif (Test-Path -LiteralPath $manifestSignature) { Remove-Item -LiteralPath $manifestSignature -Force }
 Write-Host "Portable ZIP: $zip"

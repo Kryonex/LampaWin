@@ -93,7 +93,7 @@ public partial class MainWindow : Window
         _player.PlaybackEnded += session =>
         {
             PlaybackClosed?.Invoke(session);
-            if (PlayerPage.Visibility == Visibility.Visible) Home_Click(this, new RoutedEventArgs());
+            if (PlayerPage.Visibility == Visibility.Visible && !OfferNextEpisode(session)) Home_Click(this, new RoutedEventArgs());
         };
         _windowStyle = WindowStyle;
         _resizeMode = ResizeMode;
@@ -224,6 +224,14 @@ public partial class MainWindow : Window
     {
         Dispatcher.Invoke(() =>
         {
+            ResetEpisodeOffer();
+            _lastRequest = request;
+            _nextTitle = null;
+            _streamDetail = "";
+            _openedAt = DateTimeOffset.UtcNow;
+            StreamStatusPanel.Visibility = Visibility.Collapsed;
+            _preferredAudioApplied = false;
+            _preferredSubtitleApplied = false;
             _previewTimer.Stop();
             _previewCancellation?.Cancel();
             UpdatePosition(0);
@@ -269,6 +277,7 @@ public partial class MainWindow : Window
 
     private void OnPlaybackChanged(PlaybackProgress update)
     {
+        UpdateStreamStatus(update);
         if (update.State is PlaybackState.Playing) RefreshTracksIfChanged();
         var duration = update.DurationSeconds;
         if (duration <= 0 && _seekAnchorSeconds is not null) duration = _seekDurationSeconds;
@@ -364,6 +373,7 @@ public partial class MainWindow : Window
         _subtitleTrackKey = string.Join("|", _player.SubtitleTracks.Select(x => $"{x.Id}:{x.Name}"));
         AudioTracks.SelectionChanged += AudioTracks_SelectionChanged;
         SubtitleTracks.SelectionChanged += SubtitleTracks_SelectionChanged;
+        ApplyPreferredTracks();
     }
 
     private void RefreshTracksIfChanged()
@@ -464,6 +474,7 @@ public partial class MainWindow : Window
 
     private async Task LoadSeekPreviewAsync(double fraction)
     {
+        if (!_player.PreviewEnabled) return;
         var duration = _player.MediaPlayer.Length / 1000d;
         if (duration <= 0 || SeekPreview.Visibility != Visibility.Visible) return;
         var bucket = PreviewBucket(duration, fraction);
@@ -522,6 +533,7 @@ public partial class MainWindow : Window
         _player.SetVolume(e.NewValue);
         MuteButton.Content = e.NewValue > 0 ? "\uE767" : "\uE74F";
         MuteButton.ToolTip = e.NewValue > 0 ? "Выключить звук (M)" : "Включить звук (M)";
+        SchedulePreferencesSave();
     }
     private void Mute_Click(object sender, RoutedEventArgs e) => ToggleMute();
     private void RestoreAudio_Click(object sender, RoutedEventArgs e) => _player.RestoreAudioOutput();
@@ -553,8 +565,14 @@ public partial class MainWindow : Window
     }
     private void PlayerSettings_Click(object sender, RoutedEventArgs e)
     {
+        RefreshOutputDevices();
         FoodPanelHost.Visibility = Visibility.Collapsed;
         PlayerSettingsPanel.Visibility = PlayerSettingsPanel.Visibility == Visibility.Visible ? Visibility.Collapsed : Visibility.Visible;
+        if (PlayerSettingsPanel.Visibility == Visibility.Visible)
+        {
+            PlayerSettingsPanel.UpdateLayout();
+            AudioTracks.BringIntoView();
+        }
         ShowPlayerControls();
     }
     private void AudioTracks_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -568,6 +586,9 @@ public partial class MainWindow : Window
 
     private void Home_Click(object sender, RoutedEventArgs e)
     {
+        if (_lastRequest is { } request) EpisodeDismissed?.Invoke(request.SessionId);
+        ResetEpisodeOffer();
+        StreamStatusPanel.Visibility = Visibility.Collapsed;
         ResetPlayerOverlay();
         HideVideoSurface();
         _player.Stop();
@@ -708,6 +729,7 @@ public partial class MainWindow : Window
 
     private void ResetPlayerOverlay()
     {
+        ResetEpisodeOffer();
         _controlsTimer.Stop();
         _clickTimer.Stop();
         _seeking = false;
@@ -812,6 +834,7 @@ public partial class MainWindow : Window
     private void Window_KeyDown(object sender, KeyEventArgs e)
     {
         if (e.Handled) return;
+        if (e.SystemKey == Key.F4 && Keyboard.Modifiers.HasFlag(ModifierKeys.Alt)) { PrepareClose(); Close(); e.Handled = true; return; }
         if (FoodPanelHost.Visibility == Visibility.Visible)
         {
             if (e.Key == Key.Escape) { FoodPanelHost.Visibility = Visibility.Collapsed; PlayerOverlay.Focus(); e.Handled = true; return; }
@@ -841,6 +864,8 @@ public partial class MainWindow : Window
 
     private void Window_Closed(object? sender, EventArgs e)
     {
+        SaveWindowPreferences();
+        ResetEpisodeOffer();
         _foodPanel?.Dispose();
         _controlsTimer.Stop();
         _clickTimer.Stop();

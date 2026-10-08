@@ -38,7 +38,27 @@
           <TextBlock x:Name="SourcesEmpty" Text="Список появится после запуска Jackett." Foreground="{StaticResource MutedBrush}" Margin="0,0,0,16"/>
           <TextBlock Text="Журналы" FontWeight="SemiBold" Margin="0,0,0,8"/>
           <TextBlock x:Name="LogPathText" Text="Путь к журналам будет показан после запуска." Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap"/>
-          <Button Content="Открыть папку журналов" HorizontalAlignment="Left" Margin="0,14,0,0" Click="OpenLogs_Click"/>
+          <WrapPanel Margin="0,14,0,18">
+            <Button Content="Открыть журналы" Click="OpenLogs_Click" Margin="0,0,8,8"/>
+            <Button Content="Экспорт диагностики" Click="ExportDiagnostics_Click" Margin="0,0,8,8"/>
+            <Button Content="Проверить обновления" Click="CheckUpdates_Click" Margin="0,0,8,8"/>
+          </WrapPanel>
+          <TextBlock Text="Просмотр" FontSize="18" FontWeight="SemiBold" Margin="0,0,0,10"/>
+          <CheckBox x:Name="PreviewEnabledCheck" Content="Превью кадров при наведении (при буферизации отключается)" Checked="Preferences_Changed" Unchecked="Preferences_Changed" Margin="0,0,0,10"/>
+          <CheckBox x:Name="AutoNextCheck" Content="Следующая серия автоматически через 10 секунд" Checked="Preferences_Changed" Unchecked="Preferences_Changed" Margin="0,0,0,10"/>
+          <CheckBox x:Name="ShowAllSearchCheck" Content="Показать скрытые результаты поиска, включая раздачи без сидов" Checked="Preferences_Changed" Unchecked="Preferences_Changed" Margin="0,0,0,10"/>
+          <TextBlock Text="По умолчанию скрываются нерелевантные названия, конфликтующие годы и раздачи без сидов при наличии здоровой альтернативы. Игровые категории исключаются в обоих режимах. Повторите поиск после изменения." Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" Margin="0,0,0,16"/>
+          <TextBlock Text="Предпочтительный язык аудио"/>
+          <ComboBox x:Name="PreferredAudio" SelectionChanged="Preferences_Changed" DisplayMemberPath="Name" Margin="0,6,0,12" AutomationProperties.Name="Предпочтительный язык аудио"/>
+          <TextBlock Text="Предпочтительный язык субтитров"/>
+          <ComboBox x:Name="PreferredSubtitles" SelectionChanged="Preferences_Changed" DisplayMemberPath="Name" Margin="0,6,0,18" AutomationProperties.Name="Предпочтительный язык субтитров"/>
+          <TextBlock Text="Данные приложения" FontSize="18" FontWeight="SemiBold" Margin="0,0,0,10"/>
+          <TextBlock x:Name="DataSizeText" Text="Размер данных можно обновить кнопкой ниже." TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}"/>
+          <WrapPanel Margin="0,12,0,0">
+            <Button Content="Посчитать размер" Click="DataSize_Click" Margin="0,0,8,8"/>
+            <Button Content="Очистить кеш страниц" Click="ClearCache_Click" Margin="0,0,8,8"/>
+            <Button Content="Выйти из сервисов еды" Click="ResetFood_Click" Margin="0,0,8,8"/>
+          </WrapPanel>
         </StackPanel></ScrollViewer>
       </Border>
       <Grid x:Name="PlayerPage" Visibility="Collapsed" Background="Black">
@@ -119,6 +139,19 @@
             <Border x:Name="PlaybackFeedback" HorizontalAlignment="Center" VerticalAlignment="Center" Background="#A0202020" Width="82" Height="82" CornerRadius="41" Opacity="0" IsHitTestVisible="False">
               <TextBlock x:Name="FeedbackGlyph" Text="&#xE769;" FontFamily="Segoe MDL2 Assets" FontSize="32" Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center"/>
             </Border>
+            <Border x:Name="StreamStatusPanel" MaxWidth="560" HorizontalAlignment="Center" VerticalAlignment="Center" Padding="20" CornerRadius="12" Background="#E6222229" Visibility="Collapsed">
+              <StackPanel>
+                <TextBlock x:Name="StreamStatusText" Text="Открываем видео…" Foreground="White" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite"/>
+                <WrapPanel Margin="0,14,0,0"><Button Content="Повторить" Click="RetryPlayback_Click" Margin="0,0,8,0"/><Button Content="Выбрать другую раздачу" Click="Home_Click"/></WrapPanel>
+              </StackPanel>
+            </Border>
+            <Border x:Name="NextEpisodePanel" MaxWidth="560" HorizontalAlignment="Center" VerticalAlignment="Center" Padding="24" CornerRadius="12" Background="#F2222229" Visibility="Collapsed">
+              <StackPanel>
+                <TextBlock Text="Серия завершена" FontSize="22" Foreground="White" FontWeight="SemiBold"/>
+                <TextBlock x:Name="NextEpisodeText" Foreground="White" TextWrapping="Wrap" Margin="0,12,0,18" AutomationProperties.LiveSetting="Polite"/>
+                <WrapPanel><Button x:Name="NextEpisodeButton" Content="Следующая серия" Click="NextEpisode_Click" Margin="0,0,10,0"/><Button Content="Отмена · К каталогу" Click="Home_Click"/></WrapPanel>
+              </StackPanel>
+            </Border>
             <Border x:Name="PlayerBottomBar" VerticalAlignment="Bottom" Padding="24,60,24,14">
               <Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="0,1"><GradientStop Color="#00000000" Offset="0"/><GradientStop Color="#DF000000" Offset="1"/></LinearGradientBrush></Border.Background>
               <StackPanel>
@@ -154,16 +187,21 @@
                 </Grid>
               </StackPanel>
             </Border>
-            <Border x:Name="PlayerSettingsPanel" Width="320" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,24,116" Padding="20" Background="#F2222229" BorderBrush="#44444C" BorderThickness="1" CornerRadius="14" Visibility="Collapsed">
-              <StackPanel>
+            <Border x:Name="PlayerSettingsPanel" Width="350" MaxHeight="460" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,24,116" Padding="20" Background="#F2222229" BorderBrush="#44444C" BorderThickness="1" CornerRadius="14" Visibility="Collapsed"><ScrollViewer VerticalScrollBarVisibility="Auto"><StackPanel>
                 <DockPanel Margin="0,0,0,18"><TextBlock Text="Настройки видео" FontWeight="SemiBold" FontSize="16" Foreground="White" VerticalAlignment="Center"/><Button DockPanel.Dock="Right" Content="&#xE711;" Style="{StaticResource PlayerButton}" Width="28" Height="28" FontSize="14" Click="PlayerSettings_Click" ToolTip="Закрыть настройки"/></DockPanel>
                 <TextBlock Text="Аудиодорожка" Foreground="#BBBBCC" Margin="0,0,0,8"/>
                 <ComboBox x:Name="AudioTracks" Style="{StaticResource TrackPicker}" SelectionChanged="AudioTracks_SelectionChanged" AutomationProperties.Name="Аудиодорожка"/>
                 <Button x:Name="RestoreAudioButton" Content="Восстановить звук" Click="RestoreAudio_Click" Margin="0,10,0,0" Padding="10,7" ToolTip="Подключить звук к текущему устройству Windows без перезапуска фильма" AutomationProperties.Name="Восстановить звук"/>
                 <TextBlock Text="Субтитры" Foreground="#BBBBCC" Margin="0,18,0,8"/>
                 <ComboBox x:Name="SubtitleTracks" Style="{StaticResource TrackPicker}" SelectionChanged="SubtitleTracks_SelectionChanged" AutomationProperties.Name="Субтитры"/>
-              </StackPanel>
-            </Border>
+                <Button Content="Открыть файл субтитров…" Click="OpenSubtitle_Click" Margin="0,10,0,14"/>
+                <TextBlock Text="Устройство звука" Foreground="#BBBBCC" Margin="0,0,0,8"/>
+                <ComboBox x:Name="OutputDevices" Style="{StaticResource TrackPicker}" SelectionChanged="OutputDevices_SelectionChanged" DisplayMemberPath="Name" AutomationProperties.Name="Устройство звука"/>
+                <TextBlock Text="Задержка аудио / субтитров, мс" Foreground="#BBBBCC" Margin="0,14,0,8"/>
+                <WrapPanel><TextBox x:Name="AudioDelayText" Text="0" Width="90" AutomationProperties.Name="Задержка аудио в миллисекундах"/><TextBox x:Name="SubtitleDelayText" Text="0" Width="90" Margin="8,0,0,0" AutomationProperties.Name="Задержка субтитров в миллисекундах"/><Button Content="Применить" Click="ApplyDelays_Click" Margin="0,8,0,0"/></WrapPanel>
+                <TextBlock Text="Соотношение сторон" Foreground="#BBBBCC" Margin="0,14,0,8"/>
+                <ComboBox x:Name="AspectRatios" Style="{StaticResource TrackPicker}" SelectionChanged="AspectRatio_SelectionChanged" AutomationProperties.Name="Соотношение сторон"><ComboBoxItem Content="Автоматически"/><ComboBoxItem Content="16:9"/><ComboBoxItem Content="4:3"/><ComboBoxItem Content="21:9"/></ComboBox>
+              </StackPanel></ScrollViewer></Border>
             <Border x:Name="SeekPreview" Width="176" Background="#F2222229" BorderBrush="#55FFFFFF" BorderThickness="1" CornerRadius="8" Padding="4" HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="24,0,0,92" Visibility="Collapsed" IsHitTestVisible="False">
               <StackPanel>
                 <Grid Width="166" Height="94" Background="#15151A">

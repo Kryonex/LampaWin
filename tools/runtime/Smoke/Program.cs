@@ -8,6 +8,11 @@ using System.Reflection;
 using System.Text;
 
 var root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../.."));
+if (args.Contains("--recovery-only"))
+{
+    await ComponentRecoveryCheck.RunAsync(root, Path.Combine(root, "artifacts", "checks", "component-recovery.json"));
+    return;
+}
 var data = Path.Combine(root, ".cache", "runtime-smoke", Guid.NewGuid().ToString("N"));
 var runtime = new LocalRuntime(new AppPaths(root, data));
 var recovering = false;

@@ -21,7 +21,7 @@ public static class TorrentResultPolicy
         "фильм", "сериал", "сезон", "серия"
     };
 
-    public static void FilterAndRank(JsonArray items, string? query, int? releaseYear = null, bool isSeries = false)
+    public static void FilterAndRank(JsonArray items, string? query, int? releaseYear = null, bool isSeries = false, bool includeUncertain = false)
     {
         ArgumentNullException.ThrowIfNull(items);
         var queryTokens = Tokens(query).Where(x => !IgnoredQueryWords.Contains(x)
@@ -35,12 +35,12 @@ public static class TorrentResultPolicy
         }
         var candidates = items.Where(x => x is JsonObject).Cast<JsonObject>()
             .Where(x => !IsGame(x))
-            .Where(x => IsRelevant(x, queryTokens, query, releaseYear, isSeries))
+            .Where(x => includeUncertain || IsRelevant(x, queryTokens, query, releaseYear, isSeries))
             .ToList();
 
         // Zero-seed results cannot start reliably. Keep them only when Jackett returned no
         // demonstrably healthy alternative; missing seed information is not treated as zero.
-        if (candidates.Any(x => Seeders(x) >= 3))
+        if (!includeUncertain && candidates.Any(x => Seeders(x) >= 3))
             candidates.RemoveAll(x => Seeders(x) == 0);
 
         candidates.Sort((left, right) => Score(right).CompareTo(Score(left)));

@@ -3,21 +3,24 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows10.0.17763.0</TargetFramework>
     <UseWPF>true</UseWPF>
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <AssemblyName>LampaWin</AssemblyName>
     <RootNamespace>LampaWin.Desktop</RootNamespace>
-    <Version>2.0.0.1</Version>
-    <AssemblyVersion>2.0.0.1</AssemblyVersion>
-    <FileVersion>2.0.0.1</FileVersion>
-    <InformationalVersion>2.0.0b</InformationalVersion>
-    <ReleaseVersion>2.0.0b</ReleaseVersion>
+    <Version>2.0.1</Version>
+    <AssemblyVersion>2.0.1</AssemblyVersion>
+    <FileVersion>2.0.1</FileVersion>
+    <InformationalVersion>2.0.1</InformationalVersion>
+    <ReleaseVersion>2.0.1</ReleaseVersion>
     <ApplicationIcon>Assets\LampaWin.ico</ApplicationIcon>
   </PropertyGroup>
   <ItemGroup>
     <Resource Include="Assets\LampaWin.ico" />
+    <EmbeddedResource Include="UpdateInstaller.ps1" />
+    <AssemblyMetadata Include="UpdatePublisher" Value="$(UpdatePublisher)" Condition="'$(UpdatePublisher)' != ''" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\LampaWin.Core\LampaWin.Core.csproj" />

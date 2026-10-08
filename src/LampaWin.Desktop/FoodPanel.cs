@@ -29,9 +29,12 @@ public sealed class FoodPanel : Grid, IDisposable
     private WebView2? _permissionBrowser;
     private FoodService? _selected;
     private bool _disposed;
+    private int _selectionGeneration;
+    private bool _clearingData;
     public event Action? CloseRequested;
     public event Action? ExpandRequested;
     private readonly Button _expand;
+    private readonly Button _closePopup;
 
     public FoodPanel(string profileRoot, Action<Uri> external)
     {
@@ -44,16 +47,27 @@ public sealed class FoodPanel : Grid, IDisposable
         RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         var bar = new DockPanel { Margin = new Thickness(8), LastChildFill = false };
         var close = MakeButton("×", (_, _) => CloseRequested?.Invoke());
+        NameButton(close, "Закрыть панель еды");
         DockPanel.SetDock(close, Dock.Right); bar.Children.Add(close);
         _expand = MakeButton("⤢", (_, _) => ExpandRequested?.Invoke());
         SetExpanded(false);
         DockPanel.SetDock(_expand, Dock.Right); bar.Children.Add(_expand);
         var choose = MakeButton("← Сервисы", (_, _) => ChooseService());
+        NameButton(choose, "Выбрать сервис еды");
         bar.Children.Add(choose);
-        bar.Children.Add(MakeButton("‹", (_, _) => { if (ActiveBrowser()?.CoreWebView2 is { CanGoBack: true } core) core.GoBack(); }));
-        var reload = MakeButton("↻", (_, _) => ActiveBrowser()?.Reload()); bar.Children.Add(reload);
+        var back = MakeButton("‹", (_, _) => { if (ActiveBrowser()?.CoreWebView2 is { CanGoBack: true } core) core.GoBack(); });
+        NameButton(back, "Предыдущая страница"); bar.Children.Add(back);
+        var reload = MakeButton("↻", async (_, _) =>
+        {
+            if (ActiveBrowser()?.CoreWebView2 is not null) ActiveBrowser()!.Reload();
+            else if (_selected is { } selected) await SelectServiceAsync(selected);
+        }); NameButton(reload, "Повторить загрузку сайта"); bar.Children.Add(reload);
+        _closePopup = MakeButton("✕", (_, _) => CloseActivePopup());
+        NameButton(_closePopup, "Закрыть всплывающее окно входа или оплаты");
+        _closePopup.Visibility = Visibility.Collapsed;
+        bar.Children.Add(_closePopup);
         var browser = MakeButton("↗", (_, _) => { if (_selected is { } service) _external(service.HomeUri); });
-        browser.ToolTip = "Открыть сервис в обычном браузере"; bar.Children.Add(browser);
+        NameButton(browser, "Открыть сервис в обычном браузере"); bar.Children.Add(browser);
         Children.Add(bar);
         SetRow(_sites, 1); Children.Add(_sites);
         SetRow(_picker, 1); Children.Add(_picker);
@@ -86,8 +100,30 @@ public sealed class FoodPanel : Grid, IDisposable
         return button;
     }
 
+    private static void NameButton(Button button, string name)
+    {
+        button.ToolTip = name;
+        System.Windows.Automation.AutomationProperties.SetName(button, name);
+    }
+
+    public void PrepareClose()
+    {
+        CompletePermission(CoreWebView2PermissionState.Deny);
+        foreach (var guard in _popupCloseGuards.Values) guard.Window.Closing -= guard.Handler;
+        _popupCloseGuards.Clear();
+    }
+
+    private void CloseActivePopup()
+    {
+        if (_popups.LastOrDefault() is not { } popup) return;
+        RemovePopup(popup);
+        var previous = _popups.LastOrDefault() ?? (_selected is { } service ? _browsers.GetValueOrDefault(service.Id) : null);
+        if (previous is not null) previous.Visibility = Visibility.Visible;
+    }
+
     public void ChooseService()
     {
+        _selectionGeneration++;
         CompletePermission(CoreWebView2PermissionState.Deny);
         foreach (var popup in _popups.ToArray()) RemovePopup(popup);
         _popups.Clear();
@@ -101,7 +137,9 @@ public sealed class FoodPanel : Grid, IDisposable
 
     public async Task SelectServiceAsync(FoodService service)
     {
-        if (_disposed) return;
+        if (_disposed || _clearingData) return;
+        var generation = ++_selectionGeneration;
+        foreach (var popup in _popups.ToArray()) RemovePopup(popup);
         CompletePermission(CoreWebView2PermissionState.Deny);
         var profile = FoodServices.ProfileDirectory(_profileRoot, service);
         _selected = service;
@@ -118,9 +156,12 @@ public sealed class FoodPanel : Grid, IDisposable
             var environment = await CoreWebView2Environment.CreateAsync(null, profile);
             if (_disposed) return;
             await InitializeAsync(browser, environment, service.Id == "yandex");
-            if (!_disposed) browser.CoreWebView2.Navigate(service.HomeUri.AbsoluteUri);
+            if (_disposed) return;
+            if (_browsers.GetValueOrDefault(service.Id) != browser) { browser.Dispose(); return; }
+            browser.Visibility = _selected?.Id == service.Id ? Visibility.Visible : Visibility.Collapsed;
+            browser.CoreWebView2.Navigate(service.HomeUri.AbsoluteUri);
         }
-        catch (Exception) { if (!_disposed) { _status.Text = "Сайт не открылся. Попробуй ↻ или ↗ для обычного браузера."; _browsers.Remove(service.Id); _sites.Children.Remove(browser); browser.Dispose(); } }
+        catch (Exception) { if (!_disposed) { if (generation == _selectionGeneration) _status.Text = "Сайт не открылся. Попробуй ↻ или ↗ для обычного браузера."; if (_browsers.GetValueOrDefault(service.Id) == browser) _browsers.Remove(service.Id); _sites.Children.Remove(browser); browser.Dispose(); } }
     }
 
     private async Task InitializeAsync(WebView2 browser, CoreWebView2Environment environment, bool useMobileAgent)
@@ -161,10 +202,10 @@ public sealed class FoodPanel : Grid, IDisposable
         {
             if (_permissionBrowser == browser) CompletePermission(CoreWebView2PermissionState.Deny);
             if (e.Uri == "about:blank") return;
-            if (!FoodServices.IsSafeNavigation(e.Uri)) { e.Cancel = true; _status.Text = "Эта ссылка требует отдельного приложения или не использует HTTPS."; }
-            else if (Uri.TryCreate(e.Uri, UriKind.Absolute, out var uri)) _status.Text = "🔒 " + uri.Authority;
+            if (!FoodServices.IsSafeNavigation(e.Uri)) { e.Cancel = true; if (ActiveBrowser() == browser) _status.Text = "Эта ссылка требует отдельного приложения или не использует HTTPS."; }
+            else if (ActiveBrowser() == browser && Uri.TryCreate(e.Uri, UriKind.Absolute, out var uri)) _status.Text = "🔒 " + uri.Authority;
         };
-        core.NavigationCompleted += (_, e) => { if (!e.IsSuccess) _status.Text = "Не удалось загрузить сайт. Попробуй ↻ или ↗ для обычного браузера."; };
+        core.NavigationCompleted += (_, e) => { if (!e.IsSuccess && ActiveBrowser() == browser) _status.Text = "Не удалось загрузить сайт. Попробуй ↻ или ↗ для обычного браузера."; };
         core.ServerCertificateErrorDetected += (_, e) => e.Action = CoreWebView2ServerCertificateErrorAction.Cancel;
         core.DownloadStarting += (_, e) => { e.Cancel = true; _status.Text = "Скачивание приложений отключено. Для него используй обычный браузер (↗)."; };
         core.NewWindowRequested += async (_, e) =>
@@ -174,10 +215,12 @@ public sealed class FoodPanel : Grid, IDisposable
             if (e.Uri != "about:blank" && !FoodServices.IsSafeNavigation(e.Uri)) return;
             using var deferral = e.GetDeferral();
             var popup = new WebView2();
+            var generation = _selectionGeneration;
             try
             {
                 if (_disposed) return;
                 _popups.Add(popup); _sites.Children.Add(popup);
+                _closePopup.Visibility = Visibility.Visible;
                 if (Window.GetWindow(popup) is { } host)
                 {
                     // WPF WebView2's default window.close handler closes its host.
@@ -190,6 +233,7 @@ public sealed class FoodPanel : Grid, IDisposable
                 // the panel's responsive viewport and the service's session.
                 await InitializeAsync(popup, environment, false);
                 if (_disposed) return;
+                if (generation != _selectionGeneration || browser.Visibility != Visibility.Visible) { RemovePopup(popup); return; }
                 e.NewWindow = popup.CoreWebView2;
                 browser.Visibility = Visibility.Collapsed;
                 popup.CoreWebView2.WindowCloseRequested += (_, _) =>
@@ -207,6 +251,7 @@ public sealed class FoodPanel : Grid, IDisposable
     {
         if (_popupCloseGuards.Remove(popup, out var guard)) guard.Window.Closing -= guard.Handler;
         _sites.Children.Remove(popup); _popups.Remove(popup); popup.Dispose();
+        if (_popups.Count == 0) _closePopup.Visibility = Visibility.Collapsed;
     }
 
     private static async Task ConfigureViewportAsync(CoreWebView2 core, CoreWebView2Environment environment, bool useMobileAgent)
@@ -246,10 +291,47 @@ public sealed class FoodPanel : Grid, IDisposable
         deferral?.Dispose();
     }
 
+    public async Task ClearDataAsync(bool sessions)
+    {
+        if (_clearingData || _disposed) return;
+        _clearingData = true;
+        try
+        {
+        ChooseService();
+        // Also clear profiles that were used on a previous app run but not opened now.
+        foreach (var service in FoodServices.All)
+        {
+            var profile = FoodServices.ProfileDirectory(_profileRoot, service);
+            if (!Directory.Exists(profile)) continue;
+            CoreWebView2Controller? temporary = null;
+            try
+            {
+                var browser = _browsers.GetValueOrDefault(service.Id);
+                if (browser?.CoreWebView2 is null)
+                {
+                    var environment = await CoreWebView2Environment.CreateAsync(null, profile);
+                    temporary = await environment.CreateCoreWebView2ControllerAsync(new System.Windows.Interop.WindowInteropHelper(Application.Current.MainWindow).Handle);
+                    temporary.IsVisible = false;
+                }
+                var core = temporary?.CoreWebView2 ?? browser!.CoreWebView2;
+                await core.Profile.ClearBrowsingDataAsync(sessions ? CoreWebView2BrowsingDataKinds.AllProfile : CoreWebView2BrowsingDataKinds.DiskCache);
+            }
+            finally { temporary?.Close(); }
+        }
+        if (sessions)
+        {
+            foreach (var browser in _browsers.Values) browser.Dispose();
+            _browsers.Clear(); _sites.Children.Clear();
+        }
+        }
+        finally { _clearingData = false; }
+    }
+
     public void Dispose()
     {
         if (_disposed) return;
         CompletePermission(CoreWebView2PermissionState.Deny);
+        PrepareClose();
         _disposed = true;
         foreach (var popup in _popups.ToArray()) RemovePopup(popup);
         foreach (var browser in _browsers.Values.Concat(_popups)) browser.Dispose();

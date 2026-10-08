@@ -21,8 +21,8 @@ const context = {
     Lampa: {
         Activity: { active: () => ({ component: 'torrents', movie: { first_air_date: '2025-07-13', number_of_seasons: 1 } }) },
         Storage: { set: (k, v) => { settings[k] = v; }, listener: { follow: (_, cb) => { storageChanged = cb; } } },
-        Player: { listener: { follow: (_, cb) => { create = cb; } } },
-        Torserver: { toPlayUrl: url => url }, Noty: { show: () => {} }, Select: { show: () => {}, close: () => {} }
+        Player: { listener: { follow: (_, cb) => { create = cb; } }, playlist: () => {} },
+        Torserver: { toPlayUrl: url => url.replace('&preload', '&play') }, Noty: { show: () => {} }, Select: { show: () => {}, close: () => {} }
     }
 };
 context.window = context; context.top = context;
@@ -57,5 +57,24 @@ vm.createContext(context); vm.runInContext(script, context);
     handlers.message({ data: { version: 1, type: 'flushProfile', payload: {} } });
     assert.equal(sent.at(-1).payload.history, 'preserved', 'full profile exports caches and history');
     assert.equal(typeof storageChanged, 'function');
+    const queue = [
+        { url: 'http://127.0.0.1:12345/torrserver/stream?index=1&preload', title: 'Серия 1' },
+        { url: 'http://127.0.0.1:12345/torrserver/stream?index=2&preload', title: 'Серия 2' }
+    ];
+    create({ data: Object.assign({}, queue[0], { url: queue[0].url.replace('&preload', '&play') }), abort: () => {} });
+    context.Lampa.Player.playlist(queue);
+    const firstEpisode = sent.filter(m => m.type === 'play').at(-1);
+    assert.equal(sent.at(-1).payload.nextTitle, 'Серия 2', 'playlist supplied after Player.play updates native next-episode offer');
+    handlers.message({ data: { version: 1, type: 'closed', payload: { sessionId: firstEpisode.payload.sessionId, ended: true } } });
+    const countBefore = sent.filter(m => m.type === 'play').length;
+    handlers.message({ data: { version: 1, type: 'nextEpisode', payload: { sessionId: 'stale' } } });
+    assert.equal(sent.filter(m => m.type === 'play').length, countBefore, 'stale next-episode command ignored');
+    handlers.message({ data: { version: 1, type: 'nextEpisode', payload: { sessionId: firstEpisode.payload.sessionId } } });
+    const secondEpisode = sent.filter(m => m.type === 'play').at(-1);
+    assert.equal(secondEpisode.payload.title, 'Серия 2', 'next command starts the actual next playlist item');
+    assert.equal(sent.at(-1).payload.nextTitle, null, 'last episode has no next offer');
+    handlers.message({ data: { version: 1, type: 'progress', payload: { sessionId: secondEpisode.payload.sessionId, timeSeconds: 17, durationSeconds: 100, state: 'playing' } } });
+    handlers.message({ data: { version: 1, type: 'retryPlayback', payload: { sessionId: secondEpisode.payload.sessionId } } });
+    assert.equal(sent.filter(m => m.type === 'play').at(-1).payload.startSeconds, 17, 'retry retains most recent playback position');
     console.log('PASS bridge retry, automatic configuration, native playback interception, resume, stale session, timeline, completion and profile export');
 })().catch(error => { console.error(error); process.exitCode = 1; });

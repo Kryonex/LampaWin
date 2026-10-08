@@ -35,6 +35,7 @@ internal sealed class SmokeApp(string[] args) : Application
     private Uri FixtureUri => Uri.TryCreate(args[0], UriKind.Absolute, out var url) && url.Scheme is "http" or "https"
         ? url : new Uri(Path.GetFullPath(args[0]));
     private readonly List<string> _checks = [];
+    private readonly List<string> _unavailableChecks = [];
     private MainWindow _window = null!;
     private void Check(bool condition, string name)
     {
@@ -130,6 +131,8 @@ internal sealed class SmokeApp(string[] args) : Application
             Check(foodHost.ActualWidth >= 360 && foodHost.ActualWidth <= 460, "food panel returns to compact width");
             Click("FoodButton");
             var actualPlayer = (PlayerController)typeof(MainWindow).GetField("_player", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(_window)!;
+            var audioMonitor = typeof(PlayerController).GetField("_audioDevices", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(actualPlayer);
+            var hasAudioOutput = audioMonitor?.GetType().GetProperty("DefaultOutputId")?.GetValue(audioMonitor) is string { Length: > 0 };
             Check(!foodHost.IsVisible && actualPlayer.MediaPlayer.IsPlaying, "closing food panel leaves film playing");
             Check(bottom.IsVisible && bottom.ActualWidth > 500, "overlay controls laid out over playing video");
             Check(overlay.InputHitTest(new Point(overlay.ActualWidth / 2, overlay.ActualHeight / 2)) == Element<Border>("VideoClickSurface"), "video surface receives mouse input above native HWND");
@@ -212,16 +215,21 @@ internal sealed class SmokeApp(string[] args) : Application
             var audioState = actualPlayer.MediaPlayer.State;
             Click("RestoreAudioButton");
             await Task.Delay(200);
-            Check(actualPlayer.MediaPlayer.Volume == 37 && actualPlayer.MediaPlayer.State == audioState
+            Check(volume.Value == 37 && (!hasAudioOutput || actualPlayer.MediaPlayer.Volume == 37) && actualPlayer.MediaPlayer.State == audioState
                 && Math.Abs(actualPlayer.MediaPlayer.Time - audioPosition) < 1000,
-                "restore audio button keeps volume, player state and timeline");
+                hasAudioOutput ? "restore audio button keeps volume, player state and timeline"
+                    : "restore audio without a Windows endpoint keeps UI volume, video state and timeline");
             Click("PlayerSettingsButton");
             Check(Element<Border>("PlayerSettingsPanel").IsVisible, "settings menu opens over native video");
-            Element<ComboBox>("AudioTracks").IsDropDownOpen = true;
-            await Task.Delay(150);
-            Check(Element<ComboBox>("AudioTracks").IsDropDownOpen, "audio picker opens inside foreground overlay");
-            Element<ComboBox>("AudioTracks").IsDropDownOpen = false;
-            Check(!Equals(Element<ComboBox>("AudioTracks").SelectedItem?.ToString(), "Отключено"), "audio picker reflects active native audio track");
+            if (hasAudioOutput)
+            {
+                Element<ComboBox>("AudioTracks").IsDropDownOpen = true;
+                await Task.Delay(150);
+                Check(Element<ComboBox>("AudioTracks").IsDropDownOpen, "audio picker opens inside foreground overlay");
+                Element<ComboBox>("AudioTracks").IsDropDownOpen = false;
+                Check(!Equals(Element<ComboBox>("AudioTracks").SelectedItem?.ToString(), "Отключено"), "audio picker reflects active native audio track");
+            }
+            else _unavailableChecks.AddRange(["native audio output volume requires a Windows endpoint", "audio picker opening with decoded audio tracks requires a Windows endpoint", "active native audio track requires a Windows endpoint"]);
             foreach (var width in new[] { 1440d, 920d })
             {
                 _window.Width = width;
@@ -287,12 +295,12 @@ internal sealed class SmokeApp(string[] args) : Application
             actualPlayer.PreviewEnabled = false;
             Check(await actualPlayer.CapturePreviewAsync(.5, CancellationToken.None) is null, "disabled preview opens no background decoder");
             _window.PrepareClose();
-            File.WriteAllText(report, JsonSerializer.Serialize(new { success = true, checks = _checks }, new JsonSerializerOptions { WriteIndented = true }));
+            File.WriteAllText(report, JsonSerializer.Serialize(new { success = true, checks = _checks, unavailableChecks = _unavailableChecks }, new JsonSerializerOptions { WriteIndented = true }));
             _window.Close(); Shutdown(0);
         }
         catch (Exception ex)
         {
-            File.WriteAllText(report, JsonSerializer.Serialize(new { success = false, failure = ex.ToString(), checks = _checks,
+            File.WriteAllText(report, JsonSerializer.Serialize(new { success = false, failure = ex.ToString(), checks = _checks, unavailableChecks = _unavailableChecks,
                 audioChoices = _window is null ? null : Element<ComboBox>("AudioTracks").Items.Cast<object>().Select(x => x.ToString()).ToArray(),
                 settingsBounds = _window is null ? null : new[] { Element<Border>("PlayerSettingsPanel").ActualWidth, Element<Border>("PlayerSettingsPanel").ActualHeight },
                 overlayBounds = _window is null ? null : new[] { Element<Grid>("PlayerOverlay").ActualWidth, Element<Grid>("PlayerOverlay").ActualHeight }

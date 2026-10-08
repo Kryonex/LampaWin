@@ -25,9 +25,10 @@ function Complete-Check($check) {
     $report = Get-Content -LiteralPath $check.Report -Raw | ConvertFrom-Json
     $exitMilliseconds = ([Diagnostics.Stopwatch]::GetTimestamp() - $report.closeRequestedTimestamp) * 1000 / [Diagnostics.Stopwatch]::Frequency
     $startupMilliseconds = if ($report.catalogReadyTimestamp) { [Math]::Round(($report.catalogReadyTimestamp - $check.LaunchTimestamp) * 1000 / [Diagnostics.Stopwatch]::Frequency, 1) } else { $null }
-    $result = [pscustomobject]@{ name = $check.Name; startupMilliseconds = $startupMilliseconds; catalogMilliseconds = $report.catalogMilliseconds; servicesReadyAtCatalog = $report.servicesReadyAtCatalog; playing = $report.playing; exitMilliseconds = [Math]::Round($exitMilliseconds, 1) }
+    $result = [pscustomobject]@{ name = $check.Name; startupMilliseconds = $startupMilliseconds; catalogMilliseconds = $report.catalogMilliseconds; servicesReadyAtCatalog = $report.servicesReadyAtCatalog; nativePlayerLoadedAtCatalog = $report.nativePlayerLoadedAtCatalog; playing = $report.playing; exitMilliseconds = [Math]::Round($exitMilliseconds, 1) }
     Write-Host ($result | ConvertTo-Json -Compress)
     if ($report.errors.Count -ne 0 -or $exitMilliseconds -gt 6500) { throw "Lifecycle errors or slow exit: $($check.Name)" }
+    if ($report.nativePlayerLoadedAtCatalog -eq $true) { throw 'The catalog loaded native VLC before playback.' }
     $check.Process.Dispose()
     $result
 }

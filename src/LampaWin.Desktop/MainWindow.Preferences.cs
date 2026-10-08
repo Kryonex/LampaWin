@@ -50,8 +50,11 @@ public partial class MainWindow
         PreferredSubtitles.ItemsSource = new[] { new LanguageChoice("Выключены", "off") }.Concat(languages).ToArray();
         PreferredAudio.SelectedItem = languages.FirstOrDefault(x => x.Code == _preferences.AudioLanguage) ?? languages[0];
         PreferredSubtitles.SelectedItem = PreferredSubtitles.Items.OfType<LanguageChoice>().FirstOrDefault(x => x.Code == _preferences.SubtitleLanguage);
-        _player.PreviewEnabled = _preferences.PreviewEnabled;
-        _player.SetOutputDevice(_preferences.OutputDevice);
+        if (_player is not null)
+        {
+            _player.PreviewEnabled = _preferences.PreviewEnabled;
+            _player.SetOutputDevice(_preferences.OutputDevice);
+        }
         _volumeBeforeMute = Math.Clamp(double.IsFinite(_preferences.VolumeBeforeMute) ? _preferences.VolumeBeforeMute : 80, 1, 100);
         VolumeSlider.Value = Math.Clamp(double.IsFinite(_preferences.Volume) ? _preferences.Volume : 80, 0, 100);
         Width = Math.Clamp(double.IsFinite(_preferences.WindowWidth) ? _preferences.WindowWidth : 1440, MinWidth, Math.Max(MinWidth, SystemParameters.VirtualScreenWidth));
@@ -74,7 +77,7 @@ public partial class MainWindow
         _preferences.ShowAllSearchResults = ShowAllSearchCheck.IsChecked == true;
         _preferences.AudioLanguage = (PreferredAudio.SelectedItem as LanguageChoice)?.Code ?? "";
         _preferences.SubtitleLanguage = (PreferredSubtitles.SelectedItem as LanguageChoice)?.Code ?? "off";
-        _player.PreviewEnabled = _preferences.PreviewEnabled;
+        if (_player is not null) _player.PreviewEnabled = _preferences.PreviewEnabled;
         if (!_preferences.PreviewEnabled) { _previewCancellation?.Cancel(); SeekPreview.Visibility = Visibility.Collapsed; }
         _preferredAudioApplied = _preferredSubtitleApplied = false;
         ApplyPreferredTracks();
@@ -110,16 +113,16 @@ public partial class MainWindow
 
     private void ApplyPreferredTracks()
     {
-        if (!_preferencesReady) return;
+        if (!_preferencesReady || _player is null) return;
         if (!_preferredAudioApplied && _preferences.AudioLanguage.Length > 0)
         {
-            var id = _player.FindTrack(_preferences.AudioLanguage, false);
-            if (id is { } audio) { _player.SetAudioTrack(audio); AudioTracks.SelectedItem = AudioTracks.Items.OfType<TrackChoice>().FirstOrDefault(x => x.Id == audio); _preferredAudioApplied = true; }
+            var id = Player.FindTrack(_preferences.AudioLanguage, false);
+            if (id is { } audio) { Player.SetAudioTrack(audio); AudioTracks.SelectedItem = AudioTracks.Items.OfType<TrackChoice>().FirstOrDefault(x => x.Id == audio); _preferredAudioApplied = true; }
         }
         if (!_preferredSubtitleApplied)
         {
-            var id = _preferences.SubtitleLanguage == "off" ? -1 : _player.FindTrack(_preferences.SubtitleLanguage, true);
-            if (id is { } subtitle) { _player.SetSubtitleTrack(subtitle); SubtitleTracks.SelectedItem = SubtitleTracks.Items.OfType<TrackChoice>().FirstOrDefault(x => x.Id == subtitle); _preferredSubtitleApplied = true; }
+            var id = _preferences.SubtitleLanguage == "off" ? -1 : Player.FindTrack(_preferences.SubtitleLanguage, true);
+            if (id is { } subtitle) { Player.SetSubtitleTrack(subtitle); SubtitleTracks.SelectedItem = SubtitleTracks.Items.OfType<TrackChoice>().FirstOrDefault(x => x.Id == subtitle); _preferredSubtitleApplied = true; }
         }
     }
 
@@ -201,7 +204,7 @@ public partial class MainWindow
     {
         OutputDevices.SelectionChanged -= OutputDevices_SelectionChanged;
         var devices = new[] { new DeviceChoice("Устройство Windows по умолчанию", "") }
-            .Concat(_player.OutputDevices.Select(x => new DeviceChoice(x.Name, x.Id))).ToArray();
+            .Concat(Player.OutputDevices.Select(x => new DeviceChoice(x.Name, x.Id))).ToArray();
         OutputDevices.ItemsSource = devices;
         OutputDevices.SelectedItem = devices.FirstOrDefault(x => x.Id == _preferences.OutputDevice) ?? devices[0];
         OutputDevices.SelectionChanged += OutputDevices_SelectionChanged;
@@ -209,24 +212,24 @@ public partial class MainWindow
     private void OutputDevices_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (OutputDevices.SelectedItem is not DeviceChoice device) return;
-        _preferences.OutputDevice = device.Id; _player.SetOutputDevice(device.Id); SchedulePreferencesSave();
+        _preferences.OutputDevice = device.Id; _player?.SetOutputDevice(device.Id); SchedulePreferencesSave();
     }
     private void OpenSubtitle_Click(object sender, RoutedEventArgs e)
     {
         var dialog = new OpenFileDialog { Filter = "Субтитры|*.srt;*.ass;*.ssa;*.vtt;*.sub|Все файлы|*.*", CheckFileExists = true };
-        if (dialog.ShowDialog(this) == true && !_player.AddSubtitle(dialog.FileName)) SetStreamDetail(_lastRequest?.SessionId ?? "", "VLC не смог подключить выбранные субтитры.");
+        if (dialog.ShowDialog(this) == true && !Player.AddSubtitle(dialog.FileName)) SetStreamDetail(_lastRequest?.SessionId ?? "", "VLC не смог подключить выбранные субтитры.");
     }
     private void ApplyDelays_Click(object sender, RoutedEventArgs e)
     {
         if (double.TryParse(AudioDelayText.Text, NumberStyles.Float, CultureInfo.CurrentCulture, out var audio) && double.IsFinite(audio)
             && double.TryParse(SubtitleDelayText.Text, NumberStyles.Float, CultureInfo.CurrentCulture, out var subtitles) && double.IsFinite(subtitles))
-        { _player.SetAudioDelay(audio); _player.SetSubtitleDelay(subtitles); }
+        { Player.SetAudioDelay(audio); Player.SetSubtitleDelay(subtitles); }
         else MessageBox.Show(this, "Введите задержку числом в миллисекундах.", "Настройки видео");
     }
     private void AspectRatio_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_player is null) return;
-        _player.SetAspectRatio(AspectRatios.SelectedIndex <= 0 ? null : (AspectRatios.SelectedItem as ComboBoxItem)?.Content?.ToString());
+        Player.SetAspectRatio(AspectRatios.SelectedIndex <= 0 ? null : (AspectRatios.SelectedItem as ComboBoxItem)?.Content?.ToString());
     }
     private async void CheckUpdates_Click(object sender, RoutedEventArgs e)
     {

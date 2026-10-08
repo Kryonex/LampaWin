@@ -17,7 +17,28 @@ namespace LampaWin.Desktop;
 
 public partial class MainWindow : Window
 {
-    private readonly PlayerController _player;
+    private PlayerController? _player;
+    private PlayerController Player
+    {
+        get
+        {
+            if (_player is not null) return _player;
+            var player = new PlayerController(Dispatcher) { PreviewEnabled = _preferences.PreviewEnabled };
+            player.SetVolume(VolumeSlider.Value);
+            player.SetOutputDevice(_preferences.OutputDevice);
+            player.ProgressChanged += OnPlaybackChanged;
+            player.DiagnosticChanged += diagnostic => PlaybackDiagnosticChanged?.Invoke(diagnostic);
+            player.PlaybackClosed += session => PlaybackClosed?.Invoke(session);
+            player.PlaybackEnded += session =>
+            {
+                PlaybackClosed?.Invoke(session);
+                if (PlayerPage.Visibility == Visibility.Visible && !OfferNextEpisode(session)) Home_Click(this, new RoutedEventArgs());
+            };
+            _player = player;
+            VideoSurface.MediaPlayer = player.MediaPlayer;
+            return player;
+        }
+    }
     private FoodPanel? _foodPanel;
     private bool _foodExpanded;
     private string _foodProfileRoot = Path.Combine(new LampaWin.Core.AppPaths(AppContext.BaseDirectory).DataRoot, "food-webview");
@@ -83,18 +104,7 @@ public partial class MainWindow : Window
         InitializeComponent();
         PlayerOverlay.SizeChanged += (_, _) => UpdateFoodPanelWidth();
         SourcesList.ItemsSource = _sources;
-        _player = new PlayerController(Dispatcher);
-        _player.SetVolume(VolumeSlider.Value);
         VolumeSlider.ValueChanged += VolumeSlider_ValueChanged;
-        VideoSurface.MediaPlayer = _player.MediaPlayer;
-        _player.ProgressChanged += OnPlaybackChanged;
-        _player.DiagnosticChanged += diagnostic => PlaybackDiagnosticChanged?.Invoke(diagnostic);
-        _player.PlaybackClosed += session => PlaybackClosed?.Invoke(session);
-        _player.PlaybackEnded += session =>
-        {
-            PlaybackClosed?.Invoke(session);
-            if (PlayerPage.Visibility == Visibility.Visible && !OfferNextEpisode(session)) Home_Click(this, new RoutedEventArgs());
-        };
         _windowStyle = WindowStyle;
         _resizeMode = ResizeMode;
         _windowState = WindowState;
@@ -109,7 +119,7 @@ public partial class MainWindow : Window
             _previewTimer.Stop();
             var requested = _previewFraction;
             await LoadSeekPreviewAsync(requested);
-            var duration = _player.MediaPlayer.Length / 1000d;
+            var duration = Player.MediaPlayer.Length / 1000d;
             if (SeekPreview.Visibility == Visibility.Visible && duration > 0
                 && PreviewBucket(duration, requested) != PreviewBucket(duration, _previewFraction)
                 && !_previewCache.ContainsKey(PreviewBucket(duration, _previewFraction))) _previewTimer.Start();
@@ -265,7 +275,7 @@ public partial class MainWindow : Window
             PlayerPage.UpdateLayout();
             if (Window.GetWindow(PlayerOverlay) is { } foreground && foreground != this && !foreground.IsVisible)
                 foreground.Show();
-            _player.Play(request);
+            Player.Play(request);
             ShowPlayerControls();
             if (IsActive) PlayerOverlay.Focus();
             RefreshTracks();
@@ -274,8 +284,8 @@ public partial class MainWindow : Window
 
     public void StopPlayback()
     {
-        if (Dispatcher.CheckAccess()) _player.Stop();
-        else Dispatcher.Invoke(_player.Stop);
+        if (Dispatcher.CheckAccess()) _player?.Stop();
+        else Dispatcher.Invoke(() => _player?.Stop());
     }
 
     private void OnPlaybackChanged(PlaybackProgress update)
@@ -330,7 +340,7 @@ public partial class MainWindow : Window
             UpdatePosition(Math.Clamp(displayedPosition / duration, 0, 1) * PositionSlider.Maximum);
         if (!_seeking) TimeLabel.Text = $"{FormatTime(displayedPosition)} / {FormatTime(duration)}";
         PlaybackChanged?.Invoke(update with { PositionSeconds = displayedPosition, IsBuffering = update.IsBuffering || _pendingSeekSeconds is not null || staleAfterSeek });
-        PositionSlider.IsEnabled = duration > 0 && (_player.MediaPlayer.IsSeekable || _seekAnchorSeconds is not null);
+        PositionSlider.IsEnabled = duration > 0 && (Player.MediaPlayer.IsSeekable || _seekAnchorSeconds is not null);
         if (update.State is PlaybackState.Playing)
         {
             PlayPauseButton.Content = "\uE769";
@@ -359,21 +369,21 @@ public partial class MainWindow : Window
         SubtitleTracks.SelectionChanged -= SubtitleTracks_SelectionChanged;
         AudioTracks.Items.Clear();
         SubtitleTracks.Items.Clear();
-        foreach (var track in _player.AudioTracks)
+        foreach (var track in Player.AudioTracks)
             AudioTracks.Items.Add(new TrackChoice(track.Id == -1 ? "Отключено" : track.Name, track.Id));
         SubtitleTracks.Items.Add(new TrackChoice("Выкл.", -1));
-        foreach (var track in _player.SubtitleTracks.Where(track => track.Id >= 0))
+        foreach (var track in Player.SubtitleTracks.Where(track => track.Id >= 0))
             SubtitleTracks.Items.Add(new TrackChoice(track.Name, track.Id));
         AudioTracks.DisplayMemberPath = nameof(TrackChoice.Name);
         SubtitleTracks.DisplayMemberPath = nameof(TrackChoice.Name);
-        AudioTracks.SelectedItem = AudioTracks.Items.OfType<TrackChoice>().FirstOrDefault(x => x.Id == _player.MediaPlayer.AudioTrack)
+        AudioTracks.SelectedItem = AudioTracks.Items.OfType<TrackChoice>().FirstOrDefault(x => x.Id == Player.MediaPlayer.AudioTrack)
             ?? AudioTracks.Items.OfType<TrackChoice>().FirstOrDefault(x => x.Id == previousAudioId)
             ?? AudioTracks.Items.OfType<TrackChoice>().FirstOrDefault();
-        SubtitleTracks.SelectedItem = SubtitleTracks.Items.OfType<TrackChoice>().FirstOrDefault(x => x.Id == _player.MediaPlayer.Spu)
+        SubtitleTracks.SelectedItem = SubtitleTracks.Items.OfType<TrackChoice>().FirstOrDefault(x => x.Id == Player.MediaPlayer.Spu)
             ?? SubtitleTracks.Items.OfType<TrackChoice>().FirstOrDefault(x => x.Id == previousSubtitleId)
             ?? SubtitleTracks.Items.OfType<TrackChoice>().FirstOrDefault(x => x.Id == -1);
-        _audioTrackKey = string.Join("|", _player.AudioTracks.Select(x => $"{x.Id}:{x.Name}"));
-        _subtitleTrackKey = string.Join("|", _player.SubtitleTracks.Select(x => $"{x.Id}:{x.Name}"));
+        _audioTrackKey = string.Join("|", Player.AudioTracks.Select(x => $"{x.Id}:{x.Name}"));
+        _subtitleTrackKey = string.Join("|", Player.SubtitleTracks.Select(x => $"{x.Id}:{x.Name}"));
         AudioTracks.SelectionChanged += AudioTracks_SelectionChanged;
         SubtitleTracks.SelectionChanged += SubtitleTracks_SelectionChanged;
         ApplyPreferredTracks();
@@ -381,8 +391,8 @@ public partial class MainWindow : Window
 
     private void RefreshTracksIfChanged()
     {
-        var audioKey = string.Join("|", _player.AudioTracks.Select(x => $"{x.Id}:{x.Name}"));
-        var subtitleKey = string.Join("|", _player.SubtitleTracks.Select(x => $"{x.Id}:{x.Name}"));
+        var audioKey = string.Join("|", Player.AudioTracks.Select(x => $"{x.Id}:{x.Name}"));
+        var subtitleKey = string.Join("|", Player.SubtitleTracks.Select(x => $"{x.Id}:{x.Name}"));
         if (audioKey != _audioTrackKey || subtitleKey != _subtitleTrackKey) RefreshTracks();
     }
 
@@ -434,16 +444,16 @@ public partial class MainWindow : Window
     }
     private void PositionSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
-        if (_seeking && _player.MediaPlayer.Length > 0)
-            TimeLabel.Text = $"{FormatTime(_player.MediaPlayer.Length * PositionSlider.Value / PositionSlider.Maximum / 1000d)} / {FormatTime(_player.MediaPlayer.Length / 1000d)}";
-        else if (!_updatingPosition && PositionSlider.IsKeyboardFocusWithin && _player.MediaPlayer.Length > 0)
+        if (_seeking && Player.MediaPlayer.Length > 0)
+            TimeLabel.Text = $"{FormatTime(Player.MediaPlayer.Length * PositionSlider.Value / PositionSlider.Maximum / 1000d)} / {FormatTime(Player.MediaPlayer.Length / 1000d)}";
+        else if (!_updatingPosition && PositionSlider.IsKeyboardFocusWithin && Player.MediaPlayer.Length > 0)
             SeekToFraction(PositionSlider.Value / PositionSlider.Maximum);
     }
     private void PositionSlider_MouseMove(object sender, MouseEventArgs e)
     {
         if (_seeking && Mouse.LeftButton == MouseButtonState.Pressed)
             SetSeekPointerPosition(e.GetPosition(PositionSlider).X);
-        var duration = _player.MediaPlayer.Length / 1000d;
+        var duration = Player.MediaPlayer.Length / 1000d;
         if (duration <= 0 || PositionSlider.ActualWidth <= 0) return;
         var x = Math.Clamp(e.GetPosition(PositionSlider).X, 0, PositionSlider.ActualWidth);
         _previewFraction = x / PositionSlider.ActualWidth;
@@ -477,8 +487,8 @@ public partial class MainWindow : Window
 
     private async Task LoadSeekPreviewAsync(double fraction)
     {
-        if (!_player.PreviewEnabled) return;
-        var duration = _player.MediaPlayer.Length / 1000d;
+        if (!Player.PreviewEnabled) return;
+        var duration = Player.MediaPlayer.Length / 1000d;
         if (duration <= 0 || SeekPreview.Visibility != Visibility.Visible) return;
         var bucket = PreviewBucket(duration, fraction);
         if (_previewCache.TryGetValue(bucket, out var cached))
@@ -494,7 +504,7 @@ public partial class MainWindow : Window
         _previewCancellation = cancellation;
         try
         {
-            var image = await _player.CapturePreviewAsync(Math.Clamp(bucket * 2d / duration, 0, 1), cancellation.Token);
+            var image = await Player.CapturePreviewAsync(Math.Clamp(bucket * 2d / duration, 0, 1), cancellation.Token);
             cancellation.Token.ThrowIfCancellationRequested();
             if (image is null)
             {
@@ -515,7 +525,7 @@ public partial class MainWindow : Window
 
     private void SeekToFraction(double fraction)
     {
-        var duration = _player.MediaPlayer.Length / 1000d;
+        var duration = Player.MediaPlayer.Length / 1000d;
         if (duration <= 0) return;
         fraction = Math.Clamp(fraction, 0, 1);
         _pendingSeekSeconds = duration * fraction;
@@ -529,17 +539,17 @@ public partial class MainWindow : Window
         TimeLabel.Text = $"{FormatTime(_pendingSeekSeconds.Value)} / {FormatTime(duration)}";
         SeekBufferingPanel.Visibility = Visibility.Visible;
         SeekBufferingText.Text = "Подгружаем…";
-        _player.SeekTo(fraction);
+        Player.SeekTo(fraction);
     }
     private void VolumeSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
-        _player.SetVolume(e.NewValue);
+        _player?.SetVolume(e.NewValue);
         MuteButton.Content = e.NewValue > 0 ? "\uE767" : "\uE74F";
         MuteButton.ToolTip = e.NewValue > 0 ? "Выключить звук (M)" : "Включить звук (M)";
         SchedulePreferencesSave();
     }
     private void Mute_Click(object sender, RoutedEventArgs e) => ToggleMute();
-    private void RestoreAudio_Click(object sender, RoutedEventArgs e) => _player.RestoreAudioOutput();
+    private void RestoreAudio_Click(object sender, RoutedEventArgs e) => Player.RestoreAudioOutput();
     private void ToggleMute()
     {
         if (VolumeSlider.Value > 0) { _volumeBeforeMute = VolumeSlider.Value; VolumeSlider.Value = 0; }
@@ -550,8 +560,8 @@ public partial class MainWindow : Window
     private void TogglePlayback()
     {
         if (PlayerPage.Visibility != Visibility.Visible) return;
-        var pausing = _player.MediaPlayer.IsPlaying;
-        _player.TogglePause();
+        var pausing = Player.MediaPlayer.IsPlaying;
+        Player.TogglePause();
         FeedbackGlyph.Text = pausing ? "\uE769" : "\uE768";
         PlaybackFeedback.BeginAnimation(OpacityProperty, new DoubleAnimation(1, 0, TimeSpan.FromMilliseconds(650)));
         ShowPlayerControls();
@@ -560,9 +570,9 @@ public partial class MainWindow : Window
     private void Forward_Click(object sender, RoutedEventArgs e) => SeekPlayback(10);
     private void SeekPlayback(int seconds)
     {
-        var duration = _player.MediaPlayer.Length / 1000d;
+        var duration = Player.MediaPlayer.Length / 1000d;
         if (duration <= 0) return;
-        var current = _pendingSeekSeconds ?? Math.Max(0, _player.MediaPlayer.Time / 1000d);
+        var current = _pendingSeekSeconds ?? Math.Max(0, Player.MediaPlayer.Time / 1000d);
         SeekToFraction(Math.Clamp(current + seconds, 0, duration) / duration);
         ShowPlayerControls();
     }
@@ -580,11 +590,11 @@ public partial class MainWindow : Window
     }
     private void AudioTracks_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (AudioTracks.SelectedItem is TrackChoice choice) _player.SetAudioTrack(choice.Id);
+        if (AudioTracks.SelectedItem is TrackChoice choice) Player.SetAudioTrack(choice.Id);
     }
     private void SubtitleTracks_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (SubtitleTracks.SelectedItem is TrackChoice choice) _player.SetSubtitleTrack(choice.Id);
+        if (SubtitleTracks.SelectedItem is TrackChoice choice) Player.SetSubtitleTrack(choice.Id);
     }
 
     private void Home_Click(object sender, RoutedEventArgs e)
@@ -594,7 +604,7 @@ public partial class MainWindow : Window
         StreamStatusPanel.Visibility = Visibility.Collapsed;
         ResetPlayerOverlay();
         HideVideoSurface();
-        _player.Stop();
+        _player?.Stop();
         PlayerPage.Visibility = Visibility.Collapsed;
         SettingsPage.Visibility = Visibility.Collapsed;
         BrowserPage.Visibility = Visibility.Visible;
@@ -613,7 +623,7 @@ public partial class MainWindow : Window
     {
         ResetPlayerOverlay();
         HideVideoSurface();
-        _player.Stop();
+        _player?.Stop();
         BrowserPage.Visibility = Visibility.Collapsed;
         PlayerPage.Visibility = Visibility.Collapsed;
         SettingsPage.Visibility = Visibility.Visible;
@@ -711,7 +721,7 @@ public partial class MainWindow : Window
     private void HidePlayerControls()
     {
         if (PlayerPage.Visibility != Visibility.Visible) { _controlsTimer.Stop(); return; }
-        if (!_player.MediaPlayer.IsPlaying || AudioTracks.IsDropDownOpen || SubtitleTracks.IsDropDownOpen || _seeking
+        if (!Player.MediaPlayer.IsPlaying || AudioTracks.IsDropDownOpen || SubtitleTracks.IsDropDownOpen || _seeking
             || FoodPanelHost.Visibility == Visibility.Visible || PlayerSettingsPanel.Visibility == Visibility.Visible || PlayerBottomBar.IsMouseOver || PlayerTopBar.IsMouseOver
             || (_keyboardNavigation && (PlayerBottomBar.IsKeyboardFocusWithin || PlayerTopBar.IsKeyboardFocusWithin))) return;
         _controlsTimer.Stop();
@@ -872,7 +882,7 @@ public partial class MainWindow : Window
         _previewTimer.Stop();
         _previewCancellation?.Cancel();
         VideoSurface.MediaPlayer = null;
-        return _player.DisposeAsync().AsTask();
+        return _player?.DisposeAsync().AsTask() ?? Task.CompletedTask;
     }
 
     private void Window_Closed(object? sender, EventArgs e)
@@ -888,6 +898,6 @@ public partial class MainWindow : Window
         VideoSurface.MediaPlayer = null;
         VideoSurface.Dispose();
         BrowserView.Dispose();
-        _ = _player.DisposeAsync();
+        _ = _player?.DisposeAsync();
     }
 }

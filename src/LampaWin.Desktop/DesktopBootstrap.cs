@@ -416,6 +416,7 @@ public static class DesktopBootstrap
             var catalogMilliseconds = (double?)null;
             long? catalogReadyTimestamp = null;
             var servicesReadyAtCatalog = false;
+            bool? nativePlayerLoadedAtCatalog = null;
             var playing = false;
             try
             {
@@ -427,6 +428,8 @@ public static class DesktopBootstrap
                     catalogMilliseconds = timer.Elapsed.TotalMilliseconds;
                     catalogReadyTimestamp = Stopwatch.GetTimestamp();
                     servicesReadyAtCatalog = _runtime.Snapshot is not null;
+                    nativePlayerLoadedAtCatalog = Process.GetCurrentProcess().Modules.Cast<ProcessModule>()
+                        .Any(module => module.ModuleName.Equals("libvlc.dll", StringComparison.OrdinalIgnoreCase));
                     if (fixture is not null)
                     {
                         _testPlayback = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -438,7 +441,7 @@ public static class DesktopBootstrap
                 _ = startup; // InitializeAsync observes and records its own failures.
             }
             catch (Exception ex) { RecordError("lifecycle-check", ex); _testFailed = true; }
-            var report = new { catalogMilliseconds, catalogReadyTimestamp, servicesReadyAtCatalog, playing, errors = _errors.ToArray(),
+            var report = new { catalogMilliseconds, catalogReadyTimestamp, servicesReadyAtCatalog, nativePlayerLoadedAtCatalog, playing, errors = _errors.ToArray(),
                 closeRequestedUtc = DateTimeOffset.UtcNow, closeRequestedTimestamp = Stopwatch.GetTimestamp() };
             Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(reportPath))!);
             await File.WriteAllTextAsync(reportPath, JsonSerializer.Serialize(report, new JsonSerializerOptions { WriteIndented = true }));

@@ -5,10 +5,10 @@
   #define OutputDir "..\artifacts"
 #endif
 #ifndef AppVersion
-  #define AppVersion "2.0.2"
+  #define AppVersion "2.0.3"
 #endif
 #ifndef AppFileVersion
-  #define AppFileVersion "2.0.2"
+  #define AppFileVersion "2.0.3"
 #endif
 
 [Setup]

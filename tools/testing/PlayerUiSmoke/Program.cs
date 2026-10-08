@@ -52,6 +52,12 @@ internal sealed class SmokeApp(string[] args) : Application
         Directory.CreateDirectory(Path.GetDirectoryName(report)!);
         try
         {
+            await RunUpdateConfirmationAsync(Path.GetDirectoryName(report)!);
+            if (args.Contains("--update-confirmation"))
+            {
+                File.WriteAllText(report, JsonSerializer.Serialize(new { success = true, checks = _checks }, new JsonSerializerOptions { WriteIndented = true }));
+                Shutdown(0); return;
+            }
             var root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../.."));
             var source = XDocument.Load(Path.Combine(root, "src/LampaWin.Desktop/App.xaml"));
             XNamespace ns = "http://schemas.microsoft.com/winfx/2006/xaml/presentation";
@@ -292,6 +298,38 @@ internal sealed class SmokeApp(string[] args) : Application
                 overlayBounds = _window is null ? null : new[] { Element<Grid>("PlayerOverlay").ActualWidth, Element<Grid>("PlayerOverlay").ActualHeight }
             }, new JsonSerializerOptions { WriteIndented = true }));
             _window?.Close(); Shutdown(1);
+        }
+    }
+
+    private async Task RunUpdateConfirmationAsync(string reportDirectory)
+    {
+        var updateType = typeof(MainWindow).Assembly.GetType("LampaWin.Desktop.DesktopUpdater")!;
+        var confirm = updateType.GetMethod("ConfirmSuccessfulStartupAsync", BindingFlags.NonPublic | BindingFlags.Static, [typeof(string)])!;
+        var current = typeof(MainWindow).Assembly.GetName().Version!;
+        var versions = new[] { $"{current.Major}.{current.Minor}.{current.Build}", current.ToString(), new Version(current.Major, current.Minor, current.Build, Math.Max(current.Revision, 0) + 1).ToString() };
+        for (var index = 0; index < versions.Length; index++)
+        {
+            var scratch = Path.GetFullPath(Path.Combine(reportDirectory, "update-confirmation-" + Guid.NewGuid().ToString("N")));
+            if (!scratch.StartsWith(Path.GetFullPath(reportDirectory) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) throw new IOException("Update check path escaped report directory.");
+            var run = "run-" + Guid.NewGuid().ToString("N");
+            var backup = Path.Combine(scratch, run, "backup");
+            Directory.CreateDirectory(backup);
+            await File.WriteAllTextAsync(Path.Combine(backup, "previous-program.txt"), "previous installation");
+            var result = Path.Combine(scratch, "result.json");
+            await File.WriteAllTextAsync(result, JsonSerializer.Serialize(new { status = "installed", version = versions[index], run }));
+            try
+            {
+                await (Task)confirm.Invoke(null, [scratch])!;
+                if (index < 2)
+                {
+                    using var completed = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(scratch, "last-result.json")));
+                    Check(!Directory.Exists(backup) && !File.Exists(result) && completed.RootElement.GetProperty("status").GetString() == "success", index == 0
+                        ? "three-part release confirms four-part assembly version and removes update backup"
+                        : "four-part release confirms startup and removes update backup");
+                }
+                else Check(Directory.Exists(backup) && File.Exists(result), "different release revision preserves pending result and update backup");
+            }
+            finally { Directory.Delete(scratch, true); }
         }
     }
 

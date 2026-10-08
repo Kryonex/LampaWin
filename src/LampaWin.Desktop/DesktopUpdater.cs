@@ -267,26 +267,30 @@ internal static class DesktopUpdater
         catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException) { }
     }
 
-    public static async Task ConfirmSuccessfulStartupAsync()
+    public static Task ConfirmSuccessfulStartupAsync() => ConfirmSuccessfulStartupAsync(UpdateRoot);
+
+    internal static async Task ConfirmSuccessfulStartupAsync(string updateDirectory)
     {
-        var file = Path.Combine(UpdateRoot, "result.json");
+        var file = Path.Combine(updateDirectory, "result.json");
         try
         {
             if (!File.Exists(file)) return;
             using var result = JsonDocument.Parse(await File.ReadAllBytesAsync(file));
             var root = result.RootElement;
-            if (root.GetProperty("status").GetString() != "installed" || !TryReleaseVersion(root.GetProperty("version").GetString(), out var version) || version != CurrentVersion()) return;
+            if (root.GetProperty("status").GetString() != "installed" || !TryReleaseVersion(root.GetProperty("version").GetString(), out var version)) return;
+            var current = CurrentVersion();
+            if (version.Major != current.Major || version.Minor != current.Minor || version.Build != current.Build || Math.Max(version.Revision, 0) != Math.Max(current.Revision, 0)) return;
             var name = root.GetProperty("run").GetString();
             if (name is null || !Regex.IsMatch(name, "^run-[a-f0-9]{32}$")) return;
-            var directory = Path.GetFullPath(Path.Combine(UpdateRoot, name));
-            if (!directory.StartsWith(Path.GetFullPath(UpdateRoot) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) return;
+            var directory = Path.GetFullPath(Path.Combine(updateDirectory, name));
+            if (!directory.StartsWith(Path.GetFullPath(updateDirectory) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) return;
             await Task.Run(() =>
             {
                 if (!Directory.Exists(directory) || (File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0) return;
                 if (Directory.EnumerateFileSystemEntries(directory, "*", new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = 0 }).Any(path => (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)) return;
                 Directory.Delete(directory, true);
             });
-            await File.WriteAllTextAsync(Path.Combine(UpdateRoot, "last-result.json"), JsonSerializer.Serialize(new { status = "success", version = version.ToString(), utc = DateTimeOffset.UtcNow }));
+            await File.WriteAllTextAsync(Path.Combine(updateDirectory, "last-result.json"), JsonSerializer.Serialize(new { status = "success", version = version.ToString(), utc = DateTimeOffset.UtcNow }));
             File.Delete(file);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or KeyNotFoundException) { }

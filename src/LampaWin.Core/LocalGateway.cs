@@ -18,7 +18,9 @@ namespace LampaWin.Core;
 public sealed class LocalGateway : IAsyncDisposable
 {
     private readonly AppPaths _paths;
-    private RuntimeSnapshot _runtime;
+    private RuntimeSnapshot? _runtime;
+    private readonly CancellationTokenSource _shutdown = new();
+    private Task? _disposeTask;
     private readonly HttpClient _client;
     private readonly HttpClient _publicClient;
     private readonly ConcurrentDictionary<string, (Uri Url, DateTimeOffset Expires)> _downloads = new();
@@ -28,7 +30,7 @@ public sealed class LocalGateway : IAsyncDisposable
     private readonly string _cookie = "LampaWin_" + Convert.ToHexString(RandomNumberGenerator.GetBytes(8));
     private WebApplication? _app;
     private int _loginUsed;
-    public LocalGateway(AppPaths paths, RuntimeSnapshot runtime)
+    public LocalGateway(AppPaths paths, RuntimeSnapshot? runtime = null)
     {
         _paths = paths;
         _runtime = runtime;
@@ -70,6 +72,8 @@ public sealed class LocalGateway : IAsyncDisposable
         _app = builder.Build();
         _app.Use(async (context, next) =>
         {
+            using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted, _shutdown.Token);
+            context.RequestAborted = cancellation.Token;
             if (context.Request.Host.Host != "127.0.0.1") { context.Response.StatusCode = 403; return; }
             context.Response.Headers["X-Content-Type-Options"] = "nosniff";
             context.Response.Headers["Referrer-Policy"] = "no-referrer";
@@ -135,7 +139,7 @@ public sealed class LocalGateway : IAsyncDisposable
                 await context.Response.WriteAsJsonAsync(new { version = BridgeProtocol.Version,
                     torrServerUrl = new Uri(Origin, "torrserver").AbsoluteUri,
                     jackettUrl = new Uri(Origin, "jackett").AbsoluteUri, jackettKey = "managed",
-                    indexers = current.Indexers, warnings = current.Warnings }, context.RequestAborted);
+                    indexers = current?.Indexers ?? [], warnings = current?.Warnings ?? [] }, context.RequestAborted);
                 return;
             }
             if (path is "/" or "/index.html")
@@ -177,6 +181,7 @@ public sealed class LocalGateway : IAsyncDisposable
     private async Task ProxyAsync(HttpContext context, Backend backend, string path, bool rewriteResults = false)
     {
         var current = Volatile.Read(ref _runtime);
+        if (current is null) { context.Response.StatusCode = 503; context.Response.Headers.RetryAfter = "2"; return; }
         var baseUri = backend == Backend.TorrServer ? current.TorrServerBaseUri : current.JackettBaseUri;
         var query = context.Request.Query.Where(x => backend != Backend.Jackett ||
             !x.Key.Equals("apikey", StringComparison.OrdinalIgnoreCase) && !x.Key.StartsWith("lampawin_", StringComparison.OrdinalIgnoreCase))
@@ -213,6 +218,7 @@ public sealed class LocalGateway : IAsyncDisposable
     private async Task ProxyDownloadAsync(HttpContext context, Uri original)
     {
         var current = Volatile.Read(ref _runtime);
+        if (current is null) { context.Response.StatusCode = 503; return; }
         if (original.GetLeftPart(UriPartial.Authority) != current.JackettBaseUri.GetLeftPart(UriPartial.Authority) ||
             !(original.AbsolutePath.StartsWith("/dl/", StringComparison.Ordinal) || original.AbsolutePath.StartsWith("/api/", StringComparison.Ordinal)))
         { context.Response.StatusCode = 403; return; }
@@ -331,11 +337,27 @@ public sealed class LocalGateway : IAsyncDisposable
         request.Headers.Authorization = new AuthenticationHeaderValue("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes(runtime.TorrServerUser + ":" + runtime.TorrServerPassword)));
     private static bool FixedEquals(string? left, string right) => left is not null &&
         CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(left), Encoding.UTF8.GetBytes(right));
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync() => new(_disposeTask ??= StopAsync());
+
+    private async Task StopAsync()
     {
-        if (_app is not null) { await _app.StopAsync(); await _app.DisposeAsync(); }
-        _client.Dispose();
-        _publicClient.Dispose();
-        _downloads.Clear();
+        await _shutdown.CancelAsync();
+        try
+        {
+            if (_app is not null)
+            {
+                using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                await _app.StopAsync(deadline.Token);
+                await _app.DisposeAsync();
+                _app = null;
+            }
+        }
+        finally
+        {
+            _client.Dispose();
+            _publicClient.Dispose();
+            _downloads.Clear();
+            _shutdown.Dispose();
+        }
     }
 }

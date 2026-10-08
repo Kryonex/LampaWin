@@ -126,7 +126,7 @@ public partial class MainWindow : Window
     public event Action<PlaybackDiagnostic>? PlaybackDiagnosticChanged;
 
     public async Task InitializeBrowserAsync(string profilePath, Uri initialUri,
-        Func<CoreWebView2, Task>? configureBeforeNavigation = null)
+        Func<CoreWebView2, Task>? configureBeforeNavigation = null, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(profilePath);
         _foodProfileRoot = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(profilePath))!, "food-webview");
@@ -134,8 +134,10 @@ public partial class MainWindow : Window
         if (!initialUri.IsAbsoluteUri || initialUri.Scheme != Uri.UriSchemeHttp)
             throw new ArgumentException("Каталог должен открываться по локальному HTTP-адресу.", nameof(initialUri));
         Directory.CreateDirectory(profilePath);
-        var environment = await CoreWebView2Environment.CreateAsync(null, profilePath);
-        await BrowserView.EnsureCoreWebView2Async(environment);
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(TimeSpan.FromSeconds(30));
+        var environment = await CoreWebView2Environment.CreateAsync(null, profilePath).WaitAsync(deadline.Token);
+        await BrowserView.EnsureCoreWebView2Async(environment).WaitAsync(deadline.Token);
         BrowserView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = true;
         BrowserView.CoreWebView2.Settings.AreDevToolsEnabled = false;
         BrowserView.CoreWebView2.Settings.IsStatusBarEnabled = false;
@@ -152,7 +154,8 @@ public partial class MainWindow : Window
                 StartupOverlay.Visibility = Visibility.Collapsed;
         });
         if (configureBeforeNavigation is not null)
-            await configureBeforeNavigation(BrowserView.CoreWebView2);
+            await configureBeforeNavigation(BrowserView.CoreWebView2).WaitAsync(deadline.Token);
+        deadline.Token.ThrowIfCancellationRequested();
         BrowserView.CoreWebView2.Navigate(initialUri.AbsoluteUri);
     }
 
@@ -182,7 +185,7 @@ public partial class MainWindow : Window
                 ErrorMessage.Text = message;
                 ErrorOverlay.Visibility = Visibility.Visible;
             }
-            else if (busy && BrowserPage.Visibility == Visibility.Visible)
+            else if (busy && !_browserReady && BrowserPage.Visibility == Visibility.Visible)
             {
                 ErrorOverlay.Visibility = Visibility.Collapsed;
                 StartupOverlay.Visibility = Visibility.Visible;
@@ -862,6 +865,16 @@ public partial class MainWindow : Window
         else if (e.Key == Key.Down) { VolumeSlider.Value = Math.Max(0, VolumeSlider.Value - 5); e.Handled = true; }
     }
 
+    public Task ShutdownPlayerAsync()
+    {
+        _controlsTimer.Stop();
+        _clickTimer.Stop();
+        _previewTimer.Stop();
+        _previewCancellation?.Cancel();
+        VideoSurface.MediaPlayer = null;
+        return _player.DisposeAsync().AsTask();
+    }
+
     private void Window_Closed(object? sender, EventArgs e)
     {
         SaveWindowPreferences();
@@ -874,6 +887,7 @@ public partial class MainWindow : Window
         ExitRequested?.Invoke();
         VideoSurface.MediaPlayer = null;
         VideoSurface.Dispose();
-        _player.Dispose();
+        BrowserView.Dispose();
+        _ = _player.DisposeAsync();
     }
 }

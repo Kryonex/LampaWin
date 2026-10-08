@@ -10,11 +10,11 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <AssemblyName>LampaWin</AssemblyName>
     <RootNamespace>LampaWin.Desktop</RootNamespace>
-    <Version>2.0.1</Version>
-    <AssemblyVersion>2.0.1</AssemblyVersion>
-    <FileVersion>2.0.1</FileVersion>
-    <InformationalVersion>2.0.1</InformationalVersion>
-    <ReleaseVersion>2.0.1</ReleaseVersion>
+    <Version>2.0.2</Version>
+    <AssemblyVersion>2.0.2</AssemblyVersion>
+    <FileVersion>2.0.2</FileVersion>
+    <InformationalVersion>2.0.2</InformationalVersion>
+    <ReleaseVersion>2.0.2</ReleaseVersion>
     <ApplicationIcon>Assets\LampaWin.ico</ApplicationIcon>
   </PropertyGroup>
   <ItemGroup>

@@ -115,7 +115,7 @@ backend.MapGet("/dl/fixture/", () => Results.Bytes(Encoding.UTF8.GetBytes(torren
 await backend.StartAsync();
 backendBase = backend.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.Single().TrimEnd('/') + '/';
 var runtime = new RuntimeSnapshot(new Uri(backendBase), new Uri(backendBase), apiKey, "fixture", password, ["fixture"], []);
-await using var gateway = new LocalGateway(paths, runtime);
+await using var gateway = new LocalGateway(paths);
 try
 {
     await gateway.StartAsync();
@@ -130,6 +130,10 @@ try
     Assert((await client.GetAsync(gateway.LoginUri)).StatusCode == HttpStatusCode.Forbidden, "bootstrap token single use");
     Assert((await client.GetAsync(gateway.RenewLoginUri())).StatusCode == HttpStatusCode.Redirect, "recreated browser can authenticate with a fresh one-use bootstrap");
     var html = await client.GetStringAsync(gateway.Origin);
+    Assert(html.Contains("lampawin-bridge.js"), "catalog opens before local services are ready");
+    Assert((await client.GetAsync(new Uri(gateway.Origin, "torrserver/echo"))).StatusCode == HttpStatusCode.ServiceUnavailable,
+        "pending local services return a retryable response");
+    gateway.UpdateRuntime(runtime);
     Assert(html.Contains("/lampawin-bridge.js"), "Lampa integration injected");
     Assert((await client.GetStringAsync(new Uri(gateway.Origin, "test.js"))).Contains("fixture=true"), "bundled assets served");
     var config = await client.GetStringAsync(new Uri(gateway.Origin, "lampawin-config.json"));
@@ -187,6 +191,31 @@ try
         Assert(relaxed.RootElement.GetProperty("Results").GetArrayLength() == 3, "show hidden results restores uncertain titles and zero-seed results while still excluding games");
     Assert((await client.GetAsync(new Uri(gateway.Origin, "jackett/api/v2.0/indexers/all/results?oversized=true"))).StatusCode == HttpStatusCode.BadGateway,
         "oversized chunked search response is rejected while streaming");
+    var streamStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var streamCancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    // A dedicated origin models a torrent response that never finishes on its own.
+    var slowBuilder = WebApplication.CreateSlimBuilder(); slowBuilder.Logging.ClearProviders(); slowBuilder.WebHost.UseUrls("http://127.0.0.1:0");
+    await using var slowBackend = slowBuilder.Build();
+    slowBackend.Run(async context =>
+    {
+        await context.Response.WriteAsync("stream", context.RequestAborted);
+        await context.Response.Body.FlushAsync(context.RequestAborted);
+        streamStarted.TrySetResult();
+        try { await Task.Delay(Timeout.Infinite, context.RequestAborted); }
+        catch (OperationCanceledException) { streamCancelled.TrySetResult(); }
+    });
+    await slowBackend.StartAsync();
+    var slowOrigin = new Uri(slowBackend.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.Single());
+    await using var streamingGateway = new LocalGateway(paths, runtime with { TorrServerBaseUri = slowOrigin });
+    await streamingGateway.StartAsync();
+    streamingGateway.TryCreateMediaUri(new Uri(streamingGateway.Origin, "torrserver/stream").AbsoluteUri, out var streamingUri);
+    using var streamingClient = new HttpClient();
+    using var streamingResponse = await streamingClient.GetAsync(streamingUri, HttpCompletionOption.ResponseHeadersRead);
+    await streamStarted.Task.WaitAsync(TimeSpan.FromSeconds(3));
+    var shutdownTimer = System.Diagnostics.Stopwatch.StartNew();
+    await streamingGateway.DisposeAsync();
+    await streamCancelled.Task.WaitAsync(TimeSpan.FromSeconds(3));
+    Assert(shutdownTimer.Elapsed < TimeSpan.FromSeconds(3), "gateway cancels active streaming and closes without the default drain wait");
     await backend.StopAsync();
     var unavailable = await client.GetAsync(new Uri(gateway.Origin, "torrserver/echo"));
     Assert(unavailable.StatusCode == HttpStatusCode.BadGateway, "backend outage yields controlled error");

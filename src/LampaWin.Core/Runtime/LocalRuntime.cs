@@ -26,6 +26,7 @@ public sealed class LocalRuntime : ILocalRuntime
 
     private readonly AppPaths _paths;
     private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly CancellationTokenSource _shutdown = new();
     private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(3) };
     private readonly HttpClient _setupHttp = new() { Timeout = SourceSetupTimeout };
     private readonly object _logGate = new();
@@ -36,6 +37,8 @@ public sealed class LocalRuntime : ILocalRuntime
     private ChildJob? _jackettJob;
     private CancellationTokenSource? _monitorCancellation;
     private Task? _monitorTask;
+    private CancellationTokenSource? _sourceCancellation;
+    private Task? _sourceTask;
     private RuntimeSnapshot? _snapshot;
     private int _torrPort;
     private int _jackettPort;
@@ -49,6 +52,8 @@ public sealed class LocalRuntime : ILocalRuntime
 
     public async Task<RuntimeSnapshot> StartAsync(CancellationToken cancellationToken = default)
     {
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _shutdown.Token);
+        cancellationToken = cancellation.Token;
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -85,24 +90,22 @@ public sealed class LocalRuntime : ILocalRuntime
 
                 var torrUri = new Uri($"http://127.0.0.1:{_torrPort}/");
                 var jackettUri = new Uri($"http://127.0.0.1:{_jackettPort}/");
-                var key = await WaitForJackettAsync(jackettUri, _jackett, cancellationToken).ConfigureAwait(false);
-                await WaitForTorrServerAsync(torrUri, credentials.User, credentials.Password, _torr, cancellationToken).ConfigureAwait(false);
+                var keyTask = WaitForJackettAsync(jackettUri, _jackett, cancellationToken);
+                await Task.WhenAll(keyTask, WaitForTorrServerAsync(torrUri, credentials.User, credentials.Password, _torr, cancellationToken)).ConfigureAwait(false);
+                var key = await keyTask.ConfigureAwait(false);
                 if (freshTorrData)
                     await ApplyTorrDefaultsOnceAsync(torrUri, credentials.User, credentials.Password, cancellationToken).ConfigureAwait(false);
 
-                var indexers = await BootstrapIndexersOnceAsync(jackettUri, key, cancellationToken).ConfigureAwait(false);
-                lock (_indexerSetupFailures)
-                    if (_indexerSetupFailures.Count > 0)
-                        warnings.Add("Не удалось автоматически включить некоторые источники поиска: " + string.Join(", ", _indexerSetupFailures));
+                var indexers = await ReadConfiguredIndexerIdsAsync(jackettUri, key, cancellationToken).ConfigureAwait(false);
                 if (indexers.Count == 0)
-                    warnings.Add("В Jackett пока нет настроенных источников поиска.");
-                if (indexers.Count < DefaultIndexerIds.Length)
-                    warnings.Add("Некоторые общедоступные источники поиска временно недоступны.");
+                    warnings.Add("Источники поиска настраиваются в фоне.");
 
                 _snapshot = new RuntimeSnapshot(torrUri, jackettUri, key, credentials.User, credentials.Password,
                     indexers, warnings);
                 StartMonitor();
                 SetStatus(RuntimeState.Ready, "Локальные компоненты готовы.");
+                _sourceCancellation = CancellationTokenSource.CreateLinkedTokenSource(_shutdown.Token);
+                _sourceTask = RefreshSourcesAsync(_snapshot, _sourceCancellation.Token);
                 return _snapshot;
             }
             catch
@@ -117,6 +120,8 @@ public sealed class LocalRuntime : ILocalRuntime
 
     public async Task<RuntimeSnapshot> RecoverAsync(CancellationToken cancellationToken = default)
     {
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _shutdown.Token);
+        cancellationToken = cancellation.Token;
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -155,11 +160,41 @@ public sealed class LocalRuntime : ILocalRuntime
     public async ValueTask DisposeAsync()
     {
         if (_disposed) return;
+        await _shutdown.CancelAsync().ConfigureAwait(false);
+        _monitorCancellation?.Cancel();
         await StopAsync().ConfigureAwait(false);
         _disposed = true;
         _http.Dispose();
         _setupHttp.Dispose();
         _gate.Dispose();
+        _shutdown.Dispose();
+    }
+
+    private async Task RefreshSourcesAsync(RuntimeSnapshot snapshot, CancellationToken token)
+    {
+        try
+        {
+            var indexers = await BootstrapIndexersOnceAsync(snapshot.JackettBaseUri, snapshot.JackettApiKey, token).ConfigureAwait(false);
+            var warnings = new List<string>();
+            lock (_indexerSetupFailures)
+                if (_indexerSetupFailures.Count > 0)
+                    warnings.Add("Не удалось автоматически включить некоторые источники поиска: " + string.Join(", ", _indexerSetupFailures));
+            if (indexers.Count == 0) warnings.Add("В Jackett пока нет настроенных источников поиска.");
+            if (indexers.Count < DefaultIndexerIds.Length) warnings.Add("Некоторые общедоступные источники поиска временно недоступны.");
+            await _gate.WaitAsync(token).ConfigureAwait(false);
+            try
+            {
+                if (_snapshot is { } current && current.JackettApiKey == snapshot.JackettApiKey)
+                {
+                    _snapshot = current with { Indexers = indexers, Warnings = warnings };
+                    SetStatus(RuntimeState.Ready, "Локальные компоненты готовы.");
+                }
+            }
+            finally { _gate.Release(); }
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+        catch (Exception ex) when (ex is HttpRequestException or JsonException or IOException)
+        { if (!token.IsCancellationRequested) SetStatus(RuntimeState.Degraded, "Не удалось обновить источники поиска. Нажмите «Восстановить»."); }
     }
 
     private Process StartChild(string executable, string workingDirectory, IReadOnlyList<string> args, string logName)
@@ -557,8 +592,18 @@ public sealed class LocalRuntime : ILocalRuntime
     private async Task StopCoreAsync()
     {
         _snapshot = null;
-        await StopMonitorAsync().ConfigureAwait(false);
-        await StopChildrenAsync().ConfigureAwait(false);
+        _sourceCancellation?.Cancel();
+        try
+        {
+            await StopMonitorAsync().ConfigureAwait(false);
+            if (_sourceTask is not null) await _sourceTask.ConfigureAwait(false);
+        }
+        finally
+        {
+            _sourceTask = null;
+            _sourceCancellation?.Dispose(); _sourceCancellation = null;
+            await StopChildrenAsync().ConfigureAwait(false);
+        }
     }
 
     private async Task StopMonitorAsync()
@@ -575,9 +620,8 @@ public sealed class LocalRuntime : ILocalRuntime
 
     private async Task StopChildrenAsync()
     {
-        await StopOneAsync(_torr, _torrJob).ConfigureAwait(false);
+        await Task.WhenAll(StopOneAsync(_torr, _torrJob), StopOneAsync(_jackett, _jackettJob)).ConfigureAwait(false);
         _torr = null; _torrJob?.Dispose(); _torrJob = null;
-        await StopOneAsync(_jackett, _jackettJob).ConfigureAwait(false);
         _jackett = null; _jackettJob?.Dispose(); _jackettJob = null;
     }
 

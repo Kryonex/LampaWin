@@ -19,6 +19,7 @@ public static class DesktopBootstrap
     private static Session? _session;
     private static Mutex? _instance;
     private static EventWaitHandle? _activation;
+    private static EventWaitHandle? _shutdownStarted;
     private static RegisteredWaitHandle? _activationWait;
     public static async Task RunAsync()
     {
@@ -30,16 +31,29 @@ public static class DesktopBootstrap
             Application.Current.Shutdown(result); return;
         }
         var smoke = arguments.Contains("--self-test", StringComparer.Ordinal);
+        var lifecycle = arguments.Contains("--lifecycle-check", StringComparer.Ordinal);
         var user = WindowsIdentity.GetCurrent().User?.Value ?? Environment.UserName;
         _instance = new Mutex(true, "Local\\LampaWin-" + user + (smoke ? "-test-" + Environment.ProcessId : ""), out var created);
-        if (!smoke) _activation = new EventWaitHandle(false, EventResetMode.AutoReset, "Local\\LampaWin-activate-" + user);
-        if (!created)
+        if (!smoke)
+        {
+            _activation = new EventWaitHandle(false, EventResetMode.AutoReset, "Local\\LampaWin-activate-" + user);
+            _shutdownStarted = new EventWaitHandle(false, EventResetMode.ManualReset, "Local\\LampaWin-closing-" + user);
+        }
+        var ownsInstance = created;
+        if (!ownsInstance)
+        {
+            try { ownsInstance = _instance.WaitOne(_shutdownStarted?.WaitOne(0) == true ? TimeSpan.FromSeconds(7) : TimeSpan.Zero); }
+            catch (AbandonedMutexException) { ownsInstance = true; }
+        }
+        if (!ownsInstance)
         {
             _activation?.Set();
             _activation?.Dispose(); _instance.Dispose();
+            _shutdownStarted?.Dispose();
             Application.Current.Shutdown();
             return;
         }
+        _shutdownStarted?.Reset();
         var install = ArgumentValue(arguments, "--install-root") ?? AppContext.BaseDirectory;
         var data = ArgumentValue(arguments, "--data-root");
         var paths = new AppPaths(install, data);
@@ -56,23 +70,26 @@ public static class DesktopBootstrap
         _session = new Session(paths, window);
         if (_activation is not null) _activationWait = ThreadPool.RegisterWaitForSingleObject(_activation, (_, _) => window.Dispatcher.BeginInvoke(() =>
         {
+            if (_session.IsClosing) return;
             if (window.WindowState == WindowState.Minimized) window.WindowState = WindowState.Normal;
             window.Show(); window.Activate();
         }), null, Timeout.Infinite, false);
         window.Show();
-        if (!smoke && await DesktopUpdater.CheckAndOfferAsync(_session.LifetimeToken))
-        {
-            window.Close();
-            return;
-        }
-        if (smoke)
+        if (lifecycle)
+            await _session.RunLifecycleCheckAsync(ArgumentValue(arguments, "--report") ?? Path.Combine(paths.DataRoot, "lifecycle.json"),
+                ArgumentValue(arguments, "--fixture"), ArgumentValue(arguments, "--close-after-ms"));
+        else if (smoke)
         {
             var report = ArgumentValue(arguments, "--report") ?? Path.Combine(paths.DataRoot, "self-test.json");
             var fixture = ArgumentValue(arguments, "--fixture");
             var torrent = ArgumentValue(arguments, "--torrent-url");
             await _session.RunSelfTestAsync(report, fixture, torrent);
         }
-        else await _session.InitializeAsync();
+        else
+        {
+            _ = _session.CheckForUpdatesAfterReadyAsync();
+            await _session.InitializeAsync();
+        }
     }
     private static string? ArgumentValue(string[] arguments, string name)
     {
@@ -103,6 +120,7 @@ public static class DesktopBootstrap
         private readonly List<PlaybackDiagnostic> _testDiagnostics = [];
         private bool _testFailed;
         public CancellationToken LifetimeToken => _lifetime.Token;
+        public bool IsClosing => _closing;
         public Session(AppPaths paths, MainWindow window)
         {
             _paths = paths; _window = window;
@@ -141,26 +159,30 @@ public static class DesktopBootstrap
             _runtime.StatusChanged += status => _window.Dispatcher.BeginInvoke(() =>
             {
                 if (_closing) return;
-                if (status.State == RuntimeState.Ready && _runtime.Snapshot is { } snapshot) _gateway?.UpdateRuntime(snapshot);
+                if (status.State == RuntimeState.Ready && _runtime.Snapshot is { } snapshot)
+                {
+                    _gateway?.UpdateRuntime(snapshot);
+                    _window.SetSources(snapshot.Indexers, snapshot.Warnings);
+                }
                 _window.SetStatus(status.Message, status.State is RuntimeState.Starting or RuntimeState.Recovering,
-                    status.State == RuntimeState.Failed);
+                    status.State == RuntimeState.Failed && !_ready.Task.IsCompletedSuccessfully);
             });
         }
 
         public async Task InitializeAsync(bool recover = false)
         {
-            await _initializeGate.WaitAsync(_lifetime.Token);
+            var acquired = false;
             try
             {
+                await _initializeGate.WaitAsync(_lifetime.Token);
+                acquired = true;
                 _window.SetStatus("Запускаем локальные компоненты…", true);
-                var snapshot = recover ? await _runtime.RecoverAsync(_lifetime.Token) : await _runtime.StartAsync(_lifetime.Token);
-                _window.SetSources(snapshot.Indexers, snapshot.Warnings);
+                var runtimeStartup = StartRuntimeAsync(recover);
                 if (_gateway is null)
                 {
-                    _gateway = new LocalGateway(_paths, snapshot);
+                    _gateway = new LocalGateway(_paths, _runtime.Snapshot);
                     await _gateway.StartAsync(_lifetime.Token);
                 }
-                else _gateway.UpdateRuntime(snapshot);
                 _gateway.ShowAllSearchResults = _window.ShowAllSearchResults;
                 _window.SetStatus("Открываем Lampa…", true);
                 if (_browserBroken)
@@ -195,18 +217,20 @@ public static class DesktopBootstrap
                             if (!result.IsSuccess) _window.SetStatus("Не удалось открыть интерфейс. Нажмите «Восстановить».", false, true);
                         };
                         var savedProfile = _profile.Load(); _profileNotice = _profile.RecoveryMessage;
-                        _documentScriptId = await browser.AddScriptToExecuteOnDocumentCreatedAsync(BridgeProtocol.DocumentScript(_gateway.Origin, savedProfile));
-                    });
+                        _documentScriptId = await browser.AddScriptToExecuteOnDocumentCreatedAsync(BridgeProtocol.DocumentScript(_gateway.Origin, savedProfile)).WaitAsync(_lifetime.Token);
+                    }, _lifetime.Token);
                     _browserConfigured = true;
                 }
                 else
                 {
-                    try { await SaveCurrentProfileAsync().WaitAsync(TimeSpan.FromSeconds(3)); }
+                    try { await SaveCurrentProfileAsync(_lifetime.Token).WaitAsync(TimeSpan.FromSeconds(3), _lifetime.Token); }
                     catch (Exception ex) { RecordError("profile-recover", ex); }
                     if (_documentScriptId is not null) _window.Browser.CoreWebView2.RemoveScriptToExecuteOnDocumentCreated(_documentScriptId);
-                    _documentScriptId = await _window.Browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(BridgeProtocol.DocumentScript(_gateway.Origin, _profile.Load()));
+                    _documentScriptId = await _window.Browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(BridgeProtocol.DocumentScript(_gateway.Origin, _profile.Load())).WaitAsync(_lifetime.Token);
+                    _lifetime.Token.ThrowIfCancellationRequested();
                     _window.Browser.CoreWebView2.Navigate(_gateway.Origin.AbsoluteUri);
                 }
+                await runtimeStartup;
             }
             catch (OperationCanceledException) when (_closing) { }
             catch (Exception ex)
@@ -215,7 +239,36 @@ public static class DesktopBootstrap
                 _window.SetStatus("Не удалось подготовить приложение. Проверьте свободное место и нажмите «Восстановить».", false, true);
                 _ready.TrySetException(new InvalidOperationException("Application startup failed: " + ex.GetType().Name));
             }
-            finally { _initializeGate.Release(); }
+            finally { if (acquired) _initializeGate.Release(); }
+        }
+
+        private async Task StartRuntimeAsync(bool recover)
+        {
+            try
+            {
+                var snapshot = recover ? await _runtime.RecoverAsync(_lifetime.Token) : await _runtime.StartAsync(_lifetime.Token);
+                if (_closing) return;
+                _gateway?.UpdateRuntime(snapshot);
+                _window.SetSources(snapshot.Indexers, snapshot.Warnings);
+            }
+            catch (OperationCanceledException) when (_closing) { }
+            catch (Exception ex)
+            {
+                RecordError("runtime-startup", ex);
+                if (!_closing) _window.SetStatus("Локальные службы не запустились. Нажмите «Восстановить» в настройках.", false);
+            }
+        }
+
+        public async Task CheckForUpdatesAfterReadyAsync()
+        {
+            try
+            {
+                await _ready.Task.WaitAsync(_lifetime.Token);
+                await Task.Delay(TimeSpan.FromSeconds(4), _lifetime.Token);
+                if (await DesktopUpdater.CheckAndOfferAsync(_lifetime.Token) && !_closing) _window.Close();
+            }
+            catch (OperationCanceledException) when (_closing) { }
+            catch (Exception ex) { RecordError("update-check", ex); }
         }
 
         private async void OnMessage(object? sender, CoreWebView2WebMessageReceivedEventArgs message)
@@ -298,35 +351,52 @@ public static class DesktopBootstrap
             if (_window.Browser.CoreWebView2 is not null)
                 _window.Browser.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(new { version = BridgeProtocol.Version, type, payload }));
         }
-        private async Task SaveCurrentProfileAsync()
+        private async Task SaveCurrentProfileAsync(CancellationToken cancellationToken = default)
         {
             if (_window.Browser.CoreWebView2 is null || _gateway is null ||
                 !BridgeProtocol.IsTrustedSource(_window.Browser.Source?.AbsoluteUri, _gateway.Origin)) return;
-            var json = await _window.Browser.CoreWebView2.ExecuteScriptAsync("JSON.stringify(Object.fromEntries(Object.keys(localStorage).map(k=>[k,localStorage.getItem(k)])))");
+            var json = await _window.Browser.CoreWebView2.ExecuteScriptAsync("JSON.stringify(Object.fromEntries(Object.keys(localStorage).map(k=>[k,localStorage.getItem(k)])))").WaitAsync(cancellationToken);
             var value = JsonSerializer.Deserialize<string>(json);
             if (value is not null && JsonSerializer.Deserialize<Dictionary<string, string>>(value) is { } state)
-                await _profile.SaveAsync(state);
+                await _profile.SaveAsync(state, cancellationToken);
         }
         private async void OnClosing(object? sender, CancelEventArgs args)
         {
-            if (_closing) return;
             args.Cancel = true;
-            _window.PrepareClose();
-            _window.StopPlayback();
+            if (_closing) return;
             _closing = true;
+            _shutdownStarted?.Set();
+            // Native VLC/COM teardown must never prevent a close request from completing.
+            // Exiting this process also closes its kill-on-close jobs for owned services.
+            new Thread(() =>
+            {
+                Thread.Sleep(TimeSpan.FromSeconds(6));
+                using var process = Process.GetCurrentProcess();
+                process.Kill();
+            }) { IsBackground = true, Name = "LampaWin shutdown guard" }.Start();
+            _window.Hide();
+            _window.PrepareClose();
             _window.IsEnabled = false;
             _lifetime.Cancel();
-            try { if (!_browserBroken) await SaveCurrentProfileAsync().WaitAsync(TimeSpan.FromSeconds(3)); } catch (Exception ex) { RecordError("profile-close", ex); }
-            await _initializeGate.WaitAsync();
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            var acquired = false;
+            var playerShutdown = _window.ShutdownPlayerAsync();
             try
             {
-                if (_gateway is not null) await _gateway.DisposeAsync();
-                await _runtime.DisposeAsync();
+                using var profileDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(1));
+                try { if (!_browserBroken) await SaveCurrentProfileAsync(profileDeadline.Token); }
+                catch (OperationCanceledException) { }
+                catch (Exception ex) { RecordError("profile-close", ex); }
+                await _initializeGate.WaitAsync(deadline.Token);
+                acquired = true;
+                var gatewayShutdown = _gateway?.DisposeAsync().AsTask() ?? Task.CompletedTask;
+                await Task.WhenAll(gatewayShutdown, _runtime.DisposeAsync().AsTask(), playerShutdown).WaitAsync(deadline.Token);
             }
+            catch (OperationCanceledException) { }
             catch (Exception ex) { RecordError("shutdown", ex); }
             finally
             {
-                _initializeGate.Release();
+                if (acquired) _initializeGate.Release();
                 // Always post the final close: cleanup may complete synchronously while WPF
                 // is still inside the first Closing event, where Close() is not legal.
                 _ = _window.Dispatcher.BeginInvoke(() =>
@@ -336,8 +406,43 @@ public static class DesktopBootstrap
                     if (_testFailed) Application.Current.Shutdown(1);
                     _instance?.ReleaseMutex(); _instance?.Dispose(); _instance = null;
                     _activationWait?.Unregister(null); _activation?.Dispose(); _activation = null;
+                    _shutdownStarted?.Dispose(); _shutdownStarted = null;
                 });
             }
+        }
+        public async Task RunLifecycleCheckAsync(string reportPath, string? fixture, string? closeAfterMilliseconds)
+        {
+            var timer = Stopwatch.StartNew();
+            var catalogMilliseconds = (double?)null;
+            long? catalogReadyTimestamp = null;
+            var servicesReadyAtCatalog = false;
+            var playing = false;
+            try
+            {
+                var startup = InitializeAsync();
+                if (int.TryParse(closeAfterMilliseconds, out var delay)) await Task.Delay(Math.Clamp(delay, 0, 30000));
+                else
+                {
+                    await _ready.Task.WaitAsync(TimeSpan.FromSeconds(40));
+                    catalogMilliseconds = timer.Elapsed.TotalMilliseconds;
+                    catalogReadyTimestamp = Stopwatch.GetTimestamp();
+                    servicesReadyAtCatalog = _runtime.Snapshot is not null;
+                    if (fixture is not null)
+                    {
+                        _testPlayback = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                        _window.Play(new MediaRequest(new Uri(Path.GetFullPath(fixture)), "Lifecycle fixture", 0, Guid.NewGuid().ToString()));
+                        await _testPlayback.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                        playing = true;
+                    }
+                }
+                _ = startup; // InitializeAsync observes and records its own failures.
+            }
+            catch (Exception ex) { RecordError("lifecycle-check", ex); _testFailed = true; }
+            var report = new { catalogMilliseconds, catalogReadyTimestamp, servicesReadyAtCatalog, playing, errors = _errors.ToArray(),
+                closeRequestedUtc = DateTimeOffset.UtcNow, closeRequestedTimestamp = Stopwatch.GetTimestamp() };
+            Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(reportPath))!);
+            await File.WriteAllTextAsync(reportPath, JsonSerializer.Serialize(report, new JsonSerializerOptions { WriteIndented = true }));
+            _window.Close();
         }
         private void StartStreamStatistics(string session, string? hash)
         {

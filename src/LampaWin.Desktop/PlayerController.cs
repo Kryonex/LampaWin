@@ -8,7 +8,7 @@ using System.Windows.Threading;
 namespace LampaWin.Desktop;
 
 /// <summary>Owns LibVLC resources and marshals its native callbacks onto the WPF dispatcher.</summary>
-public sealed class PlayerController : IDisposable
+public sealed class PlayerController : IDisposable, IAsyncDisposable
 {
     private readonly Dispatcher _dispatcher;
     private readonly DispatcherTimer _timer;
@@ -17,7 +17,8 @@ public sealed class PlayerController : IDisposable
     private Media? _media;
     private Uri? _currentUrl;
     private string? _sessionId;
-    private bool _disposed;
+    private volatile bool _disposed;
+    private Task? _shutdownTask;
     private PlaybackState _state = PlaybackState.Stopped;
     private volatile bool _buffering;
     private long? _pendingStartMilliseconds;
@@ -51,7 +52,7 @@ public sealed class PlayerController : IDisposable
         _player.Playing += (_, _) =>
         {
             _state = PlaybackState.Playing; ReportDiagnostic("native-playing", "Info"); Emit(_state);
-            _dispatcher.BeginInvoke(() => { ApplyPendingStart(); _player.Volume = _volume; if (_outputDevice.Length > 0) RestoreAudioOutput(); });
+            _dispatcher.BeginInvoke(() => { if (_disposed) return; ApplyPendingStart(); _player.Volume = _volume; if (_outputDevice.Length > 0) RestoreAudioOutput(); });
         };
         _player.Paused += (_, _) => { _state = PlaybackState.Paused; ReportDiagnostic("native-paused", "Info"); Emit(_state); };
         _player.Stopped += (_, _) => { _state = PlaybackState.Stopped; ReportDiagnostic("native-stopped", "Info"); Emit(_state); };
@@ -214,6 +215,7 @@ public sealed class PlayerController : IDisposable
 
     private void Emit(PlaybackState state)
     {
+        if (_disposed) return;
         var session = _sessionId;
         if (session is null) return;
         var current = new PlaybackProgress(session, Math.Max(0, _player.Time / 1000d), Math.Max(0, _player.Length / 1000d), state, _buffering);
@@ -276,24 +278,34 @@ public sealed class PlayerController : IDisposable
         if (!_reportedLogCategories.TryAdd(category, 0)) return;
         var diagnostic = new PlaybackDiagnostic(category, _player.State.ToString(), severity);
         if (!_dispatcher.HasShutdownStarted)
-            _dispatcher.BeginInvoke(() => DiagnosticChanged?.Invoke(diagnostic), DispatcherPriority.Background);
+            _dispatcher.BeginInvoke(() => { if (!_disposed) DiagnosticChanged?.Invoke(diagnostic); }, DispatcherPriority.Background);
     }
 
-    public void Dispose()
+    public void Dispose() => DisposeAsync().AsTask().GetAwaiter().GetResult();
+
+    public ValueTask DisposeAsync()
     {
-        if (_disposed) return;
-        Stop();
+        if (_shutdownTask is not null) return new ValueTask(_shutdownTask);
         _disposed = true;
         _timer.Stop();
+        _audioRecoveryTimer.Stop();
+        _previewDecoder.Cancel();
+        _sessionId = null;
         if (_audioDevices is not null)
         {
             _audioDevices.OutputChanged -= QueueAudioRecovery;
             _audioDevices.Dispose();
         }
         _libVlc.Log -= OnLibVlcLog;
-        _player.Dispose();
-        _libVlc.Dispose();
-        _ = _previewDecoder.DisposeAsync().AsTask();
+        _shutdownTask = Task.Run(async () =>
+        {
+            if (_player.Media is not null) _player.Stop();
+            _media?.Dispose(); _media = null;
+            _player.Dispose();
+            _libVlc.Dispose();
+            await _previewDecoder.DisposeAsync();
+        });
         GC.SuppressFinalize(this);
+        return new ValueTask(_shutdownTask);
     }
 }
